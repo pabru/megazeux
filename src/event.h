@@ -27,16 +27,52 @@ __M_BEGIN_DECLS
 #include "platform.h"
 #include "keysym.h"
 
-#define UPDATE_DELAY 30
+#define UPDATE_DELAY 16
 
 #define KEY_REPEAT_STACK_SIZE 32
+
+#define STATUS_NUM_KEYCODES 512
 
 #define MOUSE_BUTTON(x)         (1 << ((x) - 1))
 #define MOUSE_BUTTON_LEFT       1
 #define MOUSE_BUTTON_MIDDLE     2
 #define MOUSE_BUTTON_RIGHT      3
+
+// Extended buttons.
+// SDL 1.2 and SDL 2 both carry through X11 values.
+#ifdef CONFIG_X11
+
 #define MOUSE_BUTTON_WHEELUP    4
 #define MOUSE_BUTTON_WHEELDOWN  5
+#define MOUSE_BUTTON_WHEELLEFT  6
+#define MOUSE_BUTTON_WHEELRIGHT 7
+#define MOUSE_BUTTON_X1         8
+#define MOUSE_BUTTON_X2         9
+
+#elif defined(CONFIG_SDL)
+
+// SDL 2 maps X1 and X2, but has a separate wheel event that we map.
+#if SDL_VERSION_ATLEAST(2,0,0)
+#define MOUSE_BUTTON_X1         4
+#define MOUSE_BUTTON_X2         5
+#define MOUSE_BUTTON_WHEELUP    6
+#define MOUSE_BUTTON_WHEELDOWN  7
+#define MOUSE_BUTTON_WHEELLEFT  8
+#define MOUSE_BUTTON_WHEELRIGHT 9
+#endif //SDL_VERSION_ATLEAST(2,0,0)
+
+#endif //extended buttons
+
+// SDL 1.2 and non-SDL default.
+// Note: SDL 1.2 has no wheel left/right support.
+#ifndef MOUSE_BUTTON_WHEELUP
+#define MOUSE_BUTTON_WHEELUP    4
+#define MOUSE_BUTTON_WHEELDOWN  5
+#define MOUSE_BUTTON_X1         6
+#define MOUSE_BUTTON_X2         7
+#define MOUSE_BUTTON_WHEELLEFT  8
+#define MOUSE_BUTTON_WHEELRIGHT 9
+#endif //defaults
 
 struct buffered_status
 {
@@ -60,6 +96,7 @@ struct buffered_status
   bool caps_status;
   bool numlock_status;
   bool mouse_moved;
+  bool exit;
   Sint8 axis[16][16];
   Uint8 keymap[512];
 };
@@ -81,10 +118,13 @@ struct input_status
   bool unfocus_pause;
 };
 
+// regular keycode_internal treats numpad keys as unique keys
+// wrt_numlock translates them to numeric/navigation based on numlock status
 enum keycode_type
 {
   keycode_pc_xt,
   keycode_internal,
+  keycode_internal_wrt_numlock,
   keycode_unicode
 };
 
@@ -94,13 +134,19 @@ struct buffered_status *store_status(void);
 
 CORE_LIBSPEC bool update_event_status(void);
 CORE_LIBSPEC Uint32 update_event_status_delay(void);
+CORE_LIBSPEC void update_event_status_intake(void);
+CORE_LIBSPEC void force_release_all_keys(void);
 CORE_LIBSPEC Uint32 get_key(enum keycode_type type);
+CORE_LIBSPEC Uint32 get_last_key(enum keycode_type type);
+CORE_LIBSPEC Uint32 get_key_status(enum keycode_type type, Uint32 index);
 CORE_LIBSPEC void get_mouse_position(int *x, int *y);
 CORE_LIBSPEC void get_real_mouse_position(int *x, int *y);
 CORE_LIBSPEC Uint32 get_mouse_press(void);
 CORE_LIBSPEC Uint32 get_mouse_press_ext(void);
 CORE_LIBSPEC Uint32 get_mouse_status(void);
 CORE_LIBSPEC void warp_mouse(Uint32 x, Uint32 y);
+CORE_LIBSPEC void warp_real_mouse_x(Uint32 x);
+CORE_LIBSPEC void warp_real_mouse_y(Uint32 y);
 CORE_LIBSPEC Uint32 get_mouse_drag(void);
 CORE_LIBSPEC bool get_alt_status(enum keycode_type type);
 CORE_LIBSPEC bool get_shift_status(enum keycode_type type);
@@ -109,21 +155,27 @@ CORE_LIBSPEC void initialize_joysticks(void);
 CORE_LIBSPEC void key_press(struct buffered_status *status, enum keycode key,
  Uint16 unicode_key);
 CORE_LIBSPEC void key_release(struct buffered_status *status, enum keycode key);
-CORE_LIBSPEC void wait_for_key_release(Uint32 index);
-CORE_LIBSPEC void wait_for_mouse_release(Uint32 mouse_button);
+CORE_LIBSPEC bool get_exit_status(void);
+CORE_LIBSPEC bool set_exit_status(bool value);
+CORE_LIBSPEC bool peek_exit_input(void);
 
 // Implemented by "drivers" (SDL, Wii, and NDS currently)
-void __wait_event(void);
+void __wait_event(int timeout);
 bool __update_event_status(void);
 
-void wait_event(void);
-Uint32 get_last_key(enum keycode_type type);
+// This one is SDL-only
+#ifdef CONFIG_SDL
+bool __peek_exit_input(void);
+#endif
+
+#ifdef CONFIG_NDS
+const struct buffered_status *load_status(void);
+#endif
+
+void wait_event(int timeout);
 void force_last_key(enum keycode_type type, int val);
-Uint32 get_key_status(enum keycode_type type, Uint32 index);
 void warp_mouse_x(Uint32 x);
 void warp_mouse_y(Uint32 y);
-void warp_real_mouse_x(Uint32 x);
-void warp_real_mouse_y(Uint32 y);
 Uint32 get_mouse_x(void);
 Uint32 get_mouse_y(void);
 Uint32 get_real_mouse_x(void);
@@ -137,7 +189,18 @@ void map_joystick_hat(int joystick, enum keycode up_key, enum keycode down_key,
 void set_unfocus_pause(bool value);
 void set_num_buffered_events(Uint8 value);
 
-void real_warp_mouse(Uint32 x, Uint32 y);
+void joystick_key_press(struct buffered_status *status,
+ enum keycode key, Uint16 unicode_key);
+void joystick_key_release(struct buffered_status *status,
+ enum keycode key);
+
+void real_warp_mouse(int x, int y);
+
+#if defined(CONFIG_SDL)
+#if !SDL_VERSION_ATLEAST(2,0,0)
+bool update_autorepeat_sdl(void);
+#endif
+#endif
 
 __M_END_DECLS
 

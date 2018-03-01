@@ -49,7 +49,9 @@
 #include <vorbis/vorbisfile.h>
 #endif
 
-#if defined(CONFIG_MODPLUG) && defined(CONFIG_MIKMOD)
+#if defined(CONFIG_MODPLUG) + defined(CONFIG_MIKMOD) + \
+ defined(CONFIG_XMP) + defined(CONFIG_OPENMPT) > 1
+
 #error Can only have one module system enabled concurrently!
 #endif
 
@@ -60,6 +62,14 @@
 
 #ifdef CONFIG_MIKMOD
 #include "audio_mikmod.h"
+#endif
+
+#ifdef CONFIG_XMP
+#include "audio_xmp.h"
+#endif
+
+#ifdef CONFIG_OPENMPT
+#include "audio_openmpt.h"
 #endif
 
 #define FP_SHIFT      13
@@ -303,11 +313,16 @@ case num:                                                               \
 //   "Specifies big or little endian byte packing.
 //   0 for little endian, 1 for big endian. Typical value is 0."
 
+// Tremor (as of r19494) doesn't use this, so suppress the warning...
+#ifndef CONFIG_TREMOR
+
 #if PLATFORM_BYTE_ORDER == PLATFORM_BIG_ENDIAN
 static const int ENDIAN_PACKING = 1;
 #else
 static const int ENDIAN_PACKING = 0;
 #endif
+
+#endif // !CONFIG_TREMOR
 
 static void sampled_negative_threshold(struct sampled_stream *s_src)
 {
@@ -516,6 +531,12 @@ static Uint32 vorbis_get_position(struct audio_stream *a_src)
   return (Uint32)ov_pcm_tell(&v->vorbis_file_handle);
 }
 
+static Uint32 vorbis_get_length(struct audio_stream *a_src)
+{
+  struct vorbis_stream *v = (struct vorbis_stream *)a_src;
+  return (Uint32)ov_pcm_total(&v->vorbis_file_handle, -1);
+}
+
 static Uint32 vorbis_get_frequency(struct sampled_stream *s_src)
 {
   return s_src->frequency;
@@ -682,6 +703,13 @@ static Uint32 wav_get_position(struct audio_stream *a_src)
   return w_stream->data_offset / w_stream->bytes_per_sample;
 }
 
+static Uint32 wav_get_length(struct audio_stream *a_src)
+{
+  struct wav_stream *w_stream = (struct wav_stream *)a_src;
+
+  return w_stream->data_length / w_stream->bytes_per_sample;
+}
+
 static Uint32 wav_get_frequency(struct sampled_stream *s_src)
 {
   return s_src->frequency;
@@ -838,6 +866,7 @@ __audio_c_maybe_static void construct_audio_stream(
  void (* set_position)(struct audio_stream *a_src, Uint32 pos),
  Uint32 (* get_order)(struct audio_stream *a_src),
  Uint32 (* get_position)(struct audio_stream *a_src),
+ Uint32 (* get_length)(struct audio_stream *a_src),
  void (* destruct)(struct audio_stream *a_src),
  Uint32 volume, Uint32 repeat)
 {
@@ -848,6 +877,7 @@ __audio_c_maybe_static void construct_audio_stream(
   a_src->set_position = set_position;
   a_src->get_order = get_order;
   a_src->get_position = get_position;
+  a_src->get_length = get_length;
   a_src->destruct = destruct;
 
   if(set_volume)
@@ -906,6 +936,10 @@ static struct audio_stream *construct_vorbis_stream(char *filename,
   {
     OggVorbis_File open_file;
 
+#ifdef CONFIG_3DS
+    setvbuf(input_file, NULL, _IOFBF, 32768);
+#endif
+
     if(!ov_open(input_file, &open_file, NULL, 0))
     {
       vorbis_info *vorbis_file_info = ov_info(&open_file, -1);
@@ -951,7 +985,7 @@ static struct audio_stream *construct_vorbis_stream(char *filename,
         construct_audio_stream((struct audio_stream *)v_stream,
          vorbis_mix_data, vorbis_set_volume, vorbis_set_repeat,
          NULL, vorbis_set_position, NULL, vorbis_get_position,
-         vorbis_destruct, volume, repeat);
+         vorbis_get_length, vorbis_destruct, volume, repeat);
       }
       else
       {
@@ -1072,6 +1106,46 @@ static void* get_riff_chunk_by_id(FILE *fp, int filesize,
   return get_riff_chunk(fp, filesize, NULL, size);
 }
 
+// Simple SAM loader.
+
+static int load_sam_file(const char *file, struct wav_info *spec,
+ Uint8 **audio_buf, Uint32 *audio_len)
+{
+  Uint32 source_length;
+  void *buf;
+  int ret = 0;
+  FILE *fp;
+
+  fp = fopen_unsafe(file, "rb");
+  if(!fp)
+    goto exit_out;
+  source_length = ftell_and_rewind(fp);
+
+  // Default to no loop
+  spec->channels = 1;
+  spec->freq = freq_conversion / default_period;
+  spec->format = SAMPLE_S8;
+  spec->loop_start = 0;
+  spec->loop_end = 0;
+
+  buf = cmalloc(source_length);
+  if (fread(buf, 1, source_length, fp) < 1)
+  {
+    free(buf);
+    goto exit_close;
+  }
+  *audio_len = source_length;
+  *audio_buf = buf;
+  goto exit_close_success;
+
+exit_close_success:
+  ret = 1;
+exit_close:
+  fclose(fp);
+exit_out:
+  return ret;
+}
+
 // More lenient than SDL's WAV loader, but only supports
 // uncompressed PCM files (for now.)
 
@@ -1082,11 +1156,17 @@ static int load_wav_file(const char *file, struct wav_info *spec,
   int smpl_size, numloops;
   Uint32 loop_start, loop_end;
   char *fmt_chunk, *smpl_chunk, tmp_buf[4];
+  ssize_t sam_ext_pos = (ssize_t)strlen(file) - 4;
   int ret = 0;
   FILE *fp;
 #ifdef CONFIG_SDL
   SDL_AudioSpec sdlspec;
 #endif
+
+  // First, check if this isn't actually a SAM file. If so,
+  // route to load_sam_file instead.
+  if((sam_ext_pos > 0) && !strcasecmp(file + sam_ext_pos, ".sam"))
+    return load_sam_file(file, spec, audio_buf, audio_len);
 
   fp = fopen_unsafe(file, "rb");
   if(!fp)
@@ -1231,125 +1311,6 @@ exit_out:
   return ret;
 }
 
-// Props to madbrain for his WAV writing code which the following
-// is loosely based off of.
-
-static void write_little_endian32(Uint8 *dest, Uint32 value)
-{
-  dest[0] = value;
-  dest[1] = value >> 8;
-  dest[2] = value >> 16;
-  dest[3] = value >> 24;
-}
-
-static void write_little_endian16(Uint8 *dest, Uint32 value)
-{
-  dest[0] = value;
-  dest[1] = value >> 8;
-}
-
-static void write_chars(Uint8 *dest, const char *str)
-{
-  memcpy(dest, str, strlen(str));
-}
-
-static void convert_sam_to_wav(const char *source_name, const char *dest_name)
-{
-  Uint32 source_length, dest_length;
-  FILE *source, *dest;
-  Uint32 frequency;
-  Uint8 *data;
-  Uint32 i;
-
-  source = fopen_unsafe(source_name, "rb");
-  if(!source)
-    return;
-
-  dest = fopen_unsafe(dest_name, "wb");
-  if(!dest)
-    goto err_close_source;
-
-  source_length = ftell_and_rewind(source);
-
-  frequency = freq_conversion / default_period;
-  dest_length = source_length + 44;
-  data = cmalloc(dest_length);
-
-  write_chars(data, "RIFF");
-  write_little_endian32(data + 4, dest_length);
-  write_chars(data + 8, "WAVEfmt ");
-  write_little_endian32(data + 16, 16);
-  // PCM
-  write_little_endian16(data + 20, 1);
-  // Mono
-  write_little_endian16(data + 22, 2);
-  // Frequency (bytes per second, x2)
-  write_little_endian32(data + 24, frequency);
-  write_little_endian32(data + 28, frequency);
-  // Bytes per sample
-  write_little_endian16(data + 32, 1);
-  // Bit depth
-  write_little_endian16(data + 34, 8);
-  write_chars(data + 36, "data");
-  // Source length
-  write_little_endian32(data + 40, source_length);
-
-  // Read in the actual sample data from the SAM
-  fread(data + 44, source_length, 1, source);
-
-  // Convert from signed to unsigned
-  for(i = 44; i < dest_length; i++)
-    data[i] += 128;
-
-  fwrite(data, dest_length, 1, dest);
-
-  free(data);
-  fclose(dest);
-err_close_source:
-  fclose(source);
-}
-
-static void convert_sam_to_wav_translate(const char *src, const char *dest)
-{
-  char translated_filename_src[MAX_PATH];
-  fsafetranslate(src, translated_filename_src);
-  convert_sam_to_wav(translated_filename_src, dest);
-}
-
-__sam_to_wav_maybe_static int check_ext_for_sam_and_convert(
- const char *filename, char *new_file)
-{
-  char translated_filename_dest[MAX_PATH];
-  ssize_t ext_pos = (ssize_t)strlen(filename) - 4;
-
-  // this could end up being the same, or it might be modified
-  // (if a SAM conversion is possible).
-  strcpy(new_file, filename);
-
-  if((ext_pos > 0) && !strcasecmp(filename + ext_pos, ".sam"))
-  {
-    // SAM -> WAV
-    memcpy(new_file + ext_pos, ".wav", 4);
-
-    /* If the destination WAV already exists, check its size.
-     * If it doesn't exist, or the size is zero, recreate the WAV.
-     */
-    if(!fsafetranslate(new_file, translated_filename_dest))
-    {
-      FILE *f = fopen_unsafe(translated_filename_dest, "r");
-      if(ftell_and_rewind(f) == 0)
-        convert_sam_to_wav_translate(filename, new_file);
-      fclose(f);
-    }
-    else
-      convert_sam_to_wav_translate(filename, new_file);
-
-    return 1;
-  }
-
-  return 0;
-}
-
 #ifdef CONFIG_MODPLUG
 
 int check_ext_for_gdm_and_convert(const char *filename, char *new_file)
@@ -1397,13 +1358,10 @@ static struct audio_stream *construct_wav_stream(char *filename,
 {
   struct wav_info w_info = {0,0,0,0,0};
   struct audio_stream *ret_val = NULL;
-  char new_file[MAX_PATH];
   Uint32 data_length = 0;
   Uint8 *wav_data = NULL;
 
-  check_ext_for_sam_and_convert(filename, new_file);
-
-  if(load_wav_file(new_file, &w_info, &wav_data, &data_length))
+  if(load_wav_file(filename, &w_info, &wav_data, &data_length))
   {
     // Surround WAVs not supported yet..
     if(w_info.channels <= 2)
@@ -1431,8 +1389,8 @@ static struct audio_stream *construct_wav_stream(char *filename,
 
       construct_audio_stream((struct audio_stream *)w_stream,
        wav_mix_data, wav_set_volume, wav_set_repeat,
-       NULL, wav_set_position, NULL, wav_get_position, wav_destruct,
-       volume, repeat);
+       NULL, wav_set_position, NULL, wav_get_position, wav_get_length,
+       wav_destruct, volume, repeat);
     }
   }
 
@@ -1449,7 +1407,7 @@ static struct audio_stream *construct_pc_speaker_stream(void)
   pcs_stream = ccalloc(1, sizeof(struct pc_speaker_stream));
 
   construct_audio_stream((struct audio_stream *)pcs_stream, pcs_mix_data,
-   pcs_set_volume, NULL, NULL, NULL, NULL, NULL, pcs_destruct,
+   pcs_set_volume, NULL, NULL, NULL, NULL, NULL, NULL, pcs_destruct,
    audio.sfx_volume * 255 / 8, 0);
 
   return (struct audio_stream *)pcs_stream;
@@ -1521,6 +1479,14 @@ static struct audio_stream *construct_stream_audio_file(char *filename,
   // Mikmod will handle all editor formats except WAV. Therefore loading
   // bad WAV files as MODs may be more likely to fail with MikMod.
   a_return = construct_mikmod_stream(filename, frequency, volume, repeat);
+#endif
+
+#ifdef CONFIG_XMP
+  a_return = construct_xmp_stream(filename, frequency, volume, repeat);
+#endif
+
+#ifdef CONFIG_OPENMPT
+  a_return = construct_openmpt_stream(filename, frequency, volume, repeat);
 #endif
 
   return a_return;
@@ -1595,12 +1561,23 @@ void init_audio(struct config_info *conf)
   audio.output_frequency = conf->output_frequency;
   audio.master_resample_mode = conf->resample_mode;
 
+  audio.max_simultaneous_samples = -1;
+  audio.max_simultaneous_samples_config = conf->max_simultaneous_samples;
+
 #ifdef CONFIG_MODPLUG
   init_modplug(conf);
 #endif
 
 #ifdef CONFIG_MIKMOD
   init_mikmod(conf);
+#endif
+
+#ifdef CONFIG_XMP
+  init_xmp(conf);
+#endif
+
+#ifdef CONFIG_OPENMPT
+  init_openmpt(conf);
 #endif
 
   set_music_volume(conf->music_volume);
@@ -1624,7 +1601,7 @@ void quit_audio(void)
 /* If the mod was successfully changed, return 1.  This value is used
 *  to determine whether to change real_mod_playing.
 */
-__editor_maybe_static int load_module(char *filename, bool safely,
+int load_module(char *filename, bool safely,
  int volume)
 {
   char translated_filename[MAX_PATH];
@@ -1637,18 +1614,11 @@ __editor_maybe_static int load_module(char *filename, bool safely,
     return 1;
   }
 
-  // Should never happen, but let's find out
-  if(!strcmp(filename, "*"))
-  {
-    warn("Passed '*' as a file to load! Report this!\n");
-    return 0;
-  }
-
   if(safely)
   {
     if(fsafetranslate(filename, translated_filename) != FSAFE_SUCCESS)
     {
-      warn("Module filename '%s' failed safety checks\n", filename);
+      debug("Module filename '%s' failed safety checks\n", filename);
       return 0;
     }
 
@@ -1668,11 +1638,6 @@ __editor_maybe_static int load_module(char *filename, bool safely,
   return 1;
 }
 
-int load_board_module(struct board *src_board)
-{
-  return load_module(src_board->mod_playing, true, src_board->volume);
-}
-
 void end_module(void)
 {
   if(audio.primary_stream)
@@ -1685,6 +1650,73 @@ void end_module(void)
   audio.primary_stream = NULL;
 }
 
+void set_max_samples(int max_samples)
+{
+  // -1 is unlimited
+  int max_samples_config = audio.max_simultaneous_samples_config;
+
+  if(max_samples_config >= 0)
+  {
+    if((max_samples_config < max_samples) || (max_samples < 0))
+      max_samples = max_samples_config;
+  }
+
+  audio.max_simultaneous_samples = max_samples;
+}
+
+int get_max_samples(void)
+{
+  return audio.max_simultaneous_samples;
+}
+
+static void limit_samples(int max)
+{
+  int samples_playing = 0;
+  int cancel_num = 0;
+  struct audio_stream *current_astream = audio.stream_list_base;
+  struct audio_stream *next_astream;
+
+  if (max == -1) return; // No limit
+
+  // We want to limit the # of samples playing.
+
+  LOCK();
+
+  while(current_astream)
+  {
+    next_astream = current_astream->next;
+
+    if((current_astream != audio.primary_stream) &&
+     (current_astream != (struct audio_stream *)(audio.pcs_stream)))
+    {
+      samples_playing++;
+    }
+
+    current_astream = next_astream;
+  }
+
+  cancel_num = samples_playing - max;
+  if (cancel_num > 0) {
+    current_astream = audio.stream_list_base;
+    while(current_astream)
+    {
+      next_astream = current_astream->next;
+
+      if((current_astream != audio.primary_stream) &&
+      (current_astream != (struct audio_stream *)(audio.pcs_stream)))
+      {
+        current_astream->destruct(current_astream);
+        cancel_num--;
+        if (cancel_num <= 0) break;
+      }
+
+      current_astream = next_astream;
+    }
+  }
+
+  UNLOCK();
+}
+
 void play_sample(int freq, char *filename, bool safely)
 {
   Uint32 vol = 255 * audio.sound_volume / 8;
@@ -1694,7 +1726,7 @@ void play_sample(int freq, char *filename, bool safely)
   {
     if(fsafetranslate(filename, translated_filename) != FSAFE_SUCCESS)
     {
-      warn("Sample filename '%s' failed safety checks\n", filename);
+      debug("Sample filename '%s' failed safety checks\n", filename);
       return;
     }
 
@@ -1710,6 +1742,8 @@ void play_sample(int freq, char *filename, bool safely)
     construct_stream_audio_file(filename,
      (freq_conversion / freq) / 2, vol, 0);
   }
+
+  limit_samples(audio.max_simultaneous_samples);
 }
 
 void end_sample(void)
@@ -1871,6 +1905,22 @@ int get_position(void)
     UNLOCK();
 
     return pos;
+  }
+
+  return 0;
+}
+
+int audio_get_length(void)
+{
+  if(audio.primary_stream && audio.primary_stream->get_length)
+  {
+    int length;
+
+    LOCK();
+    length = audio.primary_stream->get_length(audio.primary_stream);
+    UNLOCK();
+
+    return length;
   }
 
   return 0;

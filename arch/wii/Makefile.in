@@ -19,6 +19,8 @@ AR      := powerpc-eabi-ar
 OBJCOPY := powerpc-eabi-objcopy
 ELF2DOL := elf2dol
 
+PORTLIBS ?= $(DEVKITPRO)/portlibs/wii
+
 #
 # Wii target rules
 #
@@ -28,15 +30,23 @@ STRIP  = /bin/true
 # Override library paths
 #
 
-VORBIS_CFLAGS  = -Iarch/wii/libvorbis/include -Iarch/wii/libogg/include
-VORBIS_LDFLAGS = -Larch/wii/libvorbis/lib -Larch/wii/libogg/lib \
-                 -lvorbisfile -lvorbis -logg
+#
+# If building with SDLWii, these need to be set manually--no sdl-config.
+# libSDL has to be linked at a very specific place in the library list,
+# but SDL_LDFLAGS gets appended to the end, so set it to something useless.
+#
+SDL_CFLAGS     = -isystem $(DEVKITPRO)/libogc/include/SDL
+SDL_LDFLAGS    = $(SDL_CFLAGS)
 
 EXTRA_INCLUDES = -isystem $(DEVKITPRO)/libogc/include \
-                 -isystem $(DEVKITPRO)/libfat-ogc/include
+                 -isystem $(DEVKITPRO)/libfat-ogc/include \
+                 -isystem $(PORTLIBS)/include
 EXTRA_LIBS     = -L$(DEVKITPRO)/libogc/lib/wii \
                  -L$(DEVKITPRO)/libfat-ogc/lib/wii \
+                 -L$(PORTLIBS)/lib \
+                 $(if $(BUILD_SDL), -lSDL,) \
                  -lfat -lasnd -lwiikeyboard -lwiiuse -lbte -logc -lstdc++ -lm
+
 
 MACHDEP = -DGEKKO -mrvl -mcpu=750 -meabi -mhard-float
 
@@ -63,7 +73,12 @@ arch/wii/%.o: arch/wii/%.c
 #
 build := build/${SUBPLATFORM}/apps/megazeux
 build: package ${build}
-	${CP} arch/wii/pad.config arch/wii/icon.png ${build}
+ifeq ($(BUILD_SDL),)
+	${CP} arch/wii/pad.config ${build}
+else
+	${CP} arch/wii/pad.config.sdl ${build}/pad.config
+endif
+	${CP} arch/wii/icon.png ${build}
 	${CP} boot.dol megazeux.dol ${build}
 	@sed "s/%VERSION%/${VERSION}/g;s/%DATE%/`date -u +%Y%m%d%H%M`/g" \
 	    arch/wii/meta.xml > ${build}/meta.xml

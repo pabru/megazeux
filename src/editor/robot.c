@@ -20,6 +20,9 @@
 
 #include "robot.h"
 
+#include "../legacy_rasm.h"
+#include "../util.h"
+
 #include <string.h>
 
 // TODO: This might have to be something different.
@@ -52,6 +55,9 @@ void create_blank_robot_direct(struct robot *cur_robot, int x, int y)
   cur_robot->bullet_type = 1;
   cur_robot->used = 1;
   cur_robot->cur_prog_line = 1;
+
+  cur_robot->commands_total = 0;
+  cur_robot->commands_cycle = 0;
 }
 
 void create_blank_scroll_direct(struct scroll *cur_scroll)
@@ -103,8 +109,8 @@ void replace_sensor(struct board *src_board, struct sensor *src_sensor,
 // worry about program or labels, but it needs the runtime stuff,
 // for now (this should change later)
 
-void duplicate_robot_direct_source(struct robot *cur_robot,
- struct robot *copy_robot, int x, int y)
+void duplicate_robot_direct_source(struct world *mzx_world,
+ struct robot *cur_robot, struct robot *copy_robot, int x, int y)
 {
   int program_source_length = cur_robot->program_source_length;
 
@@ -129,8 +135,8 @@ void duplicate_robot_direct_source(struct robot *cur_robot,
   copy_robot->status = 0;
 }
 
-void replace_robot_source(struct board *src_board, struct robot *src_robot,
- int dest_id)
+void replace_robot_source(struct world *mzx_world, struct board *src_board,
+ struct robot *src_robot, int dest_id)
 {
   char old_name[64];
   int x = (src_board->robot_list[dest_id])->xpos;
@@ -140,21 +146,21 @@ void replace_robot_source(struct board *src_board, struct robot *src_robot,
   strcpy(old_name, cur_robot->robot_name);
 
   clear_robot_contents(cur_robot);
-  duplicate_robot_direct_source(src_robot, cur_robot, x, y);
+  duplicate_robot_direct_source(mzx_world, src_robot, cur_robot, x, y);
   strcpy(cur_robot->robot_name, old_name);
 
   if(dest_id)
     change_robot_name(src_board, cur_robot, src_robot->robot_name);
 }
 
-int duplicate_robot_source(struct board *src_board, struct robot *cur_robot,
- int x, int y)
+int duplicate_robot_source(struct world *mzx_world, struct board *src_board,
+ struct robot *cur_robot, int x, int y)
 {
   int dest_id = find_free_robot(src_board);
   if(dest_id != -1)
   {
     struct robot *copy_robot = cmalloc(sizeof(struct robot));
-    duplicate_robot_direct_source(cur_robot, copy_robot, x, y);
+    duplicate_robot_direct_source(mzx_world, cur_robot, copy_robot, x, y);
     add_robot_name_entry(src_board, copy_robot, copy_robot->robot_name);
     src_board->robot_list[dest_id] = copy_robot;
   }
@@ -162,4 +168,66 @@ int duplicate_robot_source(struct board *src_board, struct robot *cur_robot,
   return dest_id;
 }
 
-#endif // CONFIG_DEBYTECODE
+#else // !CONFIG_DEBYTECODE
+
+void prepare_robot_source(struct robot *cur_robot)
+{
+  // Disassemble the robot to source. Used by the robot debugger.
+  if(!cur_robot->program_source)
+  {
+    disassemble_and_map_program(
+     cur_robot->program_bytecode, cur_robot->program_bytecode_length,
+     &cur_robot->program_source, &cur_robot->program_source_length,
+     &cur_robot->command_map, &cur_robot->command_map_length
+    );
+  }
+}
+
+#endif // !CONFIG_DEBYTECODE
+
+
+int get_current_program_line(struct robot *cur_robot)
+{
+  struct command_mapping *cmd_map = cur_robot->command_map;
+
+  int program_pos = cur_robot->cur_prog_line;
+
+  int b = cur_robot->command_map_length - 1;
+  int a = 0;
+  int i;
+
+  int d;
+
+  // If mapping information is available, we can binary search.
+  if(cmd_map)
+  {
+    while(b-a > 1)
+    {
+      i = (b - a)/2 + a;
+
+      d = cmd_map[i].bc_pos - program_pos;
+
+      if(d >= 0) b = i;
+      if(d <= 0) a = i;
+    }
+
+    if(program_pos >= cmd_map[b].bc_pos)
+      a = b;
+  }
+
+  // Otherwise, step through the program line by line.
+  else
+  {
+    char *bc = cur_robot->program_bytecode;
+    char *end = bc + program_pos;
+    a = 1;
+
+    while(bc < end)
+    {
+      bc += *bc + 2;
+      a++;
+    }
+  }
+
+  return a;
+}

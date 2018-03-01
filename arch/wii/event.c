@@ -32,8 +32,6 @@
 #include <ogc/video.h>
 #include <ogc/usbmouse.h>
 #include <wiikeyboard/keyboard.h>
-// Use of anonymous union in wiiuse header
-#pragma GCC diagnostic ignored "-pedantic"
 #include <wiiuse/wpad.h>
 #undef BOOL
 
@@ -1068,12 +1066,14 @@ bool __update_event_status(void)
   return rval;
 }
 
-void __wait_event(void)
+void __wait_event(int timeout)
 {
   mqmsg_t ev;
 
   if(!eq_inited)
     return;
+
+  if (timeout) delay(timeout);
 
   if(MQ_Receive(eq, &ev, MQ_MSG_BLOCK))
   {
@@ -1082,7 +1082,7 @@ void __wait_event(void)
   }
 }
 
-void real_warp_mouse(Uint32 x, Uint32 y)
+void real_warp_mouse(int x, int y)
 {
   // Mouse warping doesn't work too well with the Wiimote
 }

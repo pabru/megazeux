@@ -28,7 +28,7 @@
 #define PLATFORM_LIL_ENDIAN 0x1234
 #define PLATFORM_BIG_ENDIAN 0x4321
 
-#ifdef CONFIG_SDL
+#if defined(CONFIG_SDL) && !defined(SKIP_SDL)
 
 #include <SDL.h>
 
@@ -56,8 +56,8 @@
 
 #endif // CONFIG_SDL
 
-/* ModPlug uses this bizarre name to find out about endianness. It's not too
- * bad to pollute our namespace with it, so just do so here.
+/* ModPlug and XMP both use this name to find out about endianness. It's not
+ * too bad to pollute our namespace with it, so just do so here.
  */
 #if PLATFORM_BYTE_ORDER == PLATFORM_BIG_ENDIAN
 #define WORDS_BIGENDIAN

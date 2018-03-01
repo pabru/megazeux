@@ -33,29 +33,47 @@
 #include "util.h"
 #include "sys/stat.h"
 
-#if defined(CONFIG_NDS)
+// Arch-specific config.
+#ifdef CONFIG_NDS
 #define VIDEO_OUTPUT_DEFAULT "nds"
-#elif defined(CONFIG_GP2X)
+#endif
+
+#ifdef CONFIG_GP2X
 #define VIDEO_OUTPUT_DEFAULT "gp2x"
 #define AUDIO_BUFFER_SIZE 128
-#elif defined(CONFIG_PSP)
+#endif
+
+#ifdef CONFIG_PSP
 #define FULLSCREEN_WIDTH_DEFAULT 640
 #define FULLSCREEN_HEIGHT_DEFAULT 363
 #define FORCE_BPP_DEFAULT 8
 #define FULLSCREEN_DEFAULT 1
-#elif defined(CONFIG_WII)
+#endif
+
+#ifdef CONFIG_WII
 #define AUDIO_SAMPLE_RATE 48000
-#elif defined(ANDROID)
+#ifdef CONFIG_SDL
+#define VIDEO_OUTPUT_DEFAULT "software"
+#define FULLSCREEN_WIDTH_DEFAULT 640
+#define FULLSCREEN_HEIGHT_DEFAULT 480
 #define FORCE_BPP_DEFAULT 16
 #define FULLSCREEN_DEFAULT 1
 #endif
+#endif
+
+#ifdef ANDROID
+#define FORCE_BPP_DEFAULT 16
+#define FULLSCREEN_DEFAULT 1
+#endif
+
+// End arch-specific config.
 
 #ifndef FORCE_BPP_DEFAULT
 #define FORCE_BPP_DEFAULT 32
 #endif
 
 #ifndef VIDEO_OUTPUT_DEFAULT
-#define VIDEO_OUTPUT_DEFAULT "software"
+#define VIDEO_OUTPUT_DEFAULT "auto_glsl"
 #endif
 
 #ifndef AUDIO_BUFFER_SIZE
@@ -84,18 +102,25 @@
 #endif
 
 #ifndef UPDATE_HOST_COUNT
-#define UPDATE_HOST_COUNT 2
+#define UPDATE_HOST_COUNT 3
 #endif
 
 #ifndef UPDATE_HOSTS
-#define UPDATE_HOSTS { "updates.digitalmzx.net", "updates.mzx.devzero.co.uk" }
+#define UPDATE_HOSTS {     \
+ "updates.digitalmzx.net", \
+ "updates.megazeux.org",   \
+ "updates.megazeux.net",   \
+}
 #endif
 #endif /* CONFIG_UPDATER */
+
+static bool is_startup = false;
 
 struct config_entry
 {
   char option_name[OPTION_NAME_LEN];
   config_function change_option;
+  bool allow_in_game_config;
 };
 
 #ifdef CONFIG_NETWORK
@@ -157,6 +182,27 @@ static void config_update_branch_pin(struct config_info *conf, char *name,
 {
   strncpy(conf->update_branch_pin, value, 256);
   conf->update_branch_pin[256 - 1] = 0;
+}
+
+static void config_update_auto_check(struct config_info *conf, char *name,
+ char *value, char *extended_data)
+{
+  if(!strcmp(value, "off"))
+  {
+    conf->update_auto_check = UPDATE_AUTO_CHECK_OFF;
+  }
+  else
+
+  if(!strcmp(value, "on"))
+  {
+    conf->update_auto_check = UPDATE_AUTO_CHECK_ON;
+  }
+  else
+
+  if(!strcmp(value, "silent"))
+  {
+    conf->update_auto_check = UPDATE_AUTO_CHECK_SILENT;
+  }
 }
 
 #endif // CONFIG_UPDATER
@@ -347,10 +393,10 @@ static void joy_hat_set(struct config_info *conf, char *name,
  char *value, char *extended_data)
 {
   unsigned int joy_num;
-  unsigned long joy_key_up, joy_key_down, joy_key_left, joy_key_right;
+  unsigned int joy_key_up, joy_key_down, joy_key_left, joy_key_right;
   
   sscanf(name, "joy%uhat", &joy_num);
-  sscanf(value, "%l, %l, %l, %l", &joy_key_up, &joy_key_down,
+  sscanf(value, "%u, %u, %u, %u", &joy_key_up, &joy_key_down,
    &joy_key_left, &joy_key_right);
   
   joy_num = CLAMP(joy_num, 1, 16);
@@ -417,6 +463,7 @@ static void config_set_video_output(struct config_info *conf, char *name,
  char *value, char *extended_data)
 {
   strncpy(conf->video_output, value, 16);
+  conf->video_output[15] = 0;
 }
 
 static void config_enable_resizing(struct config_info *conf, char *name,
@@ -429,6 +476,14 @@ static void config_set_gl_filter_method(struct config_info *conf,
  char *name, char *value, char *extended_data)
 {
   strncpy(conf->gl_filter_method, value, 16);
+  conf->gl_filter_method[15] = 0;
+}
+
+static void config_set_gl_scaling_shader(struct config_info *conf,
+ char *name, char *value, char *extended_data)
+{
+  strncpy(conf->gl_scaling_shader, value, 32);
+  conf->gl_scaling_shader[31] = 0;
 }
 
 static void config_gl_vsync(struct config_info *conf, char *name,
@@ -441,6 +496,18 @@ static void config_startup_editor(struct config_info *conf, char *name,
  char *value, char *extended_data)
 {
   conf->startup_editor = strtoul(value, NULL, 10);
+}
+
+static void config_standalone_mode(struct config_info *conf, char *name,
+ char *value, char *extended_data)
+{
+  conf->standalone_mode = strtoul(value, NULL, 10);
+}
+
+static void config_no_titlescreen(struct config_info *conf, char *name,
+ char *value, char *extended_data)
+{
+  conf->no_titlescreen = strtoul(value, NULL, 10);
 }
 
 static void config_set_video_ratio(struct config_info *conf, char *name,
@@ -461,57 +528,69 @@ static void config_set_num_buffered_events(struct config_info *conf,
   set_num_buffered_events(v);
 }
 
+static void config_max_simultaneous_samples(struct config_info *conf,
+ char *name, char *value, char *extended_data)
+{
+  int v = MAX( strtol(value, NULL, 10), -1 );
+  conf->max_simultaneous_samples = v;
+}
+
 /* FAT NOTE: This is searched as a binary tree, the nodes must be
  *           sorted alphabetically, or they risk being ignored.
  */
 static const struct config_entry config_options[] =
 {
-  { "audio_buffer", config_set_audio_buffer },
-  { "audio_sample_rate", config_set_audio_freq },
-  { "disassemble_base", config_disassemble_base },
-  { "disassemble_extras", config_disassemble_extras },
-  { "enable_oversampling", config_enable_oversampling },
-  { "enable_resizing", config_enable_resizing },
-  { "force_bpp", config_force_bpp },
-  { "fullscreen", config_set_fullscreen },
-  { "fullscreen_resolution", config_set_resolution },
-  { "gl_filter_method", config_set_gl_filter_method },
-  { "gl_vsync", config_gl_vsync },
-  { "include", include2_config },
-  { "include*", include_config },
-  { "joy!axis!", joy_axis_set },
-  { "joy!button!", joy_button_set },
-  { "joy!hat", joy_hat_set },
-  { "mask_midchars", config_mask_midchars },
-  { "modplug_resample_mode", config_mp_resample_mode },
-  { "music_on", config_set_music },
-  { "music_volume", config_set_mod_volume },
-  { "mzx_speed", config_set_mzx_speed },
+  { "audio_buffer", config_set_audio_buffer, false },
+  { "audio_sample_rate", config_set_audio_freq, false },
+  { "disassemble_base", config_disassemble_base, false },
+  { "disassemble_extras", config_disassemble_extras, false },
+  { "enable_oversampling", config_enable_oversampling, false },
+  { "enable_resizing", config_enable_resizing, false },
+  { "force_bpp", config_force_bpp, false },
+  { "fullscreen", config_set_fullscreen, false },
+  { "fullscreen_resolution", config_set_resolution, false },
+  { "gl_filter_method", config_set_gl_filter_method, false },
+  { "gl_scaling_shader", config_set_gl_scaling_shader, true },
+  { "gl_vsync", config_gl_vsync, false },
+  { "include", include2_config, true },
+  { "include*", include_config, true },
+  { "joy!axis!", joy_axis_set, true },
+  { "joy!button!", joy_button_set, true },
+  { "joy!hat", joy_hat_set, true },
+  { "mask_midchars", config_mask_midchars, false },
+  { "max_simultaneous_samples", config_max_simultaneous_samples, false },
+  { "modplug_resample_mode", config_mp_resample_mode, false },
+  { "music_on", config_set_music, false },
+  { "music_volume", config_set_mod_volume, false },
+  { "mzx_speed", config_set_mzx_speed, true },
 #ifdef CONFIG_NETWORK
-  { "network_enabled", config_set_network_enabled },
+  { "network_enabled", config_set_network_enabled, false },
 #endif
-  { "num_buffered_events", config_set_num_buffered_events },
-  { "pause_on_unfocus", pause_on_unfocus },
-  { "pc_speaker_on", config_set_pc_speaker },
-  { "pc_speaker_volume", config_set_sfx_volume },
-  { "resample_mode", config_resample_mode },
-  { "sample_volume", config_set_sam_volume },
-  { "save_file", config_save_file },
+  { "no_titlescreen", config_no_titlescreen, false },
+  { "num_buffered_events", config_set_num_buffered_events, false },
+  { "pause_on_unfocus", pause_on_unfocus, false },
+  { "pc_speaker_on", config_set_pc_speaker, false },
+  { "pc_speaker_volume", config_set_sfx_volume, false },
+  { "resample_mode", config_resample_mode, false },
+  { "sample_volume", config_set_sam_volume, false },
+  { "save_file", config_save_file, false },
 #ifdef CONFIG_NETWORK
-  { "socks_host", config_set_socks_host },
-  { "socks_port", config_set_socks_port },
+  { "socks_host", config_set_socks_host, false },
+  { "socks_port", config_set_socks_port, false },
 #endif
-  { "startup_editor", config_startup_editor },
-  { "startup_file", config_startup_file },
-  { "startup_path", config_startup_path },
-  { "system_mouse", config_system_mouse },
+  { "standalone_mode", config_standalone_mode, false },
+  { "startup_editor", config_startup_editor, false },
+  { "startup_file", config_startup_file, false },
+  { "startup_path", config_startup_path, false },
+  { "system_mouse", config_system_mouse, false },
 #ifdef CONFIG_UPDATER
-  { "update_branch_pin", config_update_branch_pin },
-  { "update_host", config_update_host },
+  { "update_auto_check", config_update_auto_check, false },
+  { "update_branch_pin", config_update_branch_pin, false },
+  { "update_host", config_update_host, false },
 #endif
-  { "video_output", config_set_video_output },
-  { "video_ratio", config_set_video_ratio },
-  { "window_resolution", config_window_resolution }
+  { "video_output", config_set_video_output, false },
+  { "video_ratio", config_set_video_ratio, false },
+  { "window_resolution", config_window_resolution, false }
 };
 
 static const int num_config_options =
@@ -552,8 +631,9 @@ static const struct config_info default_options =
   1,                            // allow_resize
   VIDEO_OUTPUT_DEFAULT,         // video_output
   FORCE_BPP_DEFAULT,            // force_bpp
-  RATIO_STRETCH,                // video_ratio
+  RATIO_MODERN_64_35,           // video_ratio
   "linear",                     // opengl filter method
+  "",                           // opengl default scaling shader
   0,                            // opengl vsync mode
 
   // Audio options
@@ -562,6 +642,7 @@ static const struct config_info default_options =
   0,                            // oversampling_on
   1,                            // resample_mode
   2,                            // modplug_resample_mode
+  -1,                           // max_simultaneous_samples
   8,                            // music_volume
   8,                            // sam_volume
   8,                            // pc_speaker_volume
@@ -576,6 +657,8 @@ static const struct config_info default_options =
   1,                            // disassemble_extras
   10,                           // disassemble_base
   0,                            // startup_editor
+  0,                            // standalone_mode
+  0,                            // no_titlescreen
 
   1,                            // mask_midchars
   false,                        // system_mouse
@@ -593,17 +676,26 @@ static const struct config_info default_options =
 #else /* !CONFIG_DEBYTECODE */
   "Stable",                     // update_branch_pin
 #endif /* !CONFIG_DEBYTECODE */
+  UPDATE_AUTO_CHECK_SILENT,     // update_auto_check
+  0,                            // update_available
 #endif /* CONFIG_UPDATER */
 };
 
-static void config_change_option(void *conf, char *name,
+static int config_change_option(void *conf, char *name,
  char *value, char *extended_data)
 {
   const struct config_entry *current_option = find_option(name,
    config_options, num_config_options);
 
   if(current_option)
-    current_option->change_option(conf, name, value, extended_data);
+  {
+    if(current_option->allow_in_game_config || is_startup)
+    {
+      current_option->change_option(conf, name, value, extended_data);
+      return 1;
+    }
+  }
+  return 0;
 }
 
 __editor_maybe_static void __set_config_from_file(
@@ -713,6 +805,7 @@ __editor_maybe_static void __set_config_from_command_line(
   char current_char, *input_position, *output_position;
   char *equals_position, line_buffer[256], *value;
   int i = 1;
+  int j;
 
   while(i < *argc)
   {
@@ -741,26 +834,35 @@ __editor_maybe_static void __set_config_from_command_line(
 
     if(equals_position && line_buffer[0])
     {
-      int j;
-
       *equals_position = 0;
       value = equals_position + 1;
-      find_change_handler(conf, line_buffer, value, NULL);
 
-      for(j = i; j < *argc - 1; j++)
-        argv[j] = argv[j + 1];
-      (*argc)--;
+      if(find_change_handler(conf, line_buffer, value, NULL))
+      {
+        // Found the option; remove it from argv and make sure i stays the same
+        for(j = i; j < *argc - 1; j++)
+          argv[j] = argv[j + 1];
+        (*argc)--;
+        i--;
+      }
+      // Otherwise, leave it for the editor config.
     }
-    else
-    {
-      i++;
-    }
+
+    i++;
   }
 }
 
 void set_config_from_file(struct config_info *conf, const char *conf_file_name)
 {
   __set_config_from_file(config_change_option, conf, conf_file_name);
+}
+
+void set_config_from_file_startup(struct config_info *conf,
+ const char *conf_file_name)
+{
+  is_startup = true;
+  set_config_from_file(conf, conf_file_name);
+  is_startup = false;
 }
 
 void default_config(struct config_info *conf)
@@ -790,7 +892,9 @@ void default_config(struct config_info *conf)
 void set_config_from_command_line(struct config_info *conf,
  int *argc, char *argv[])
 {
+  is_startup = true;
   __set_config_from_command_line(config_change_option, conf, argc, argv);
+  is_startup = false;
 }
 
 void free_config(struct config_info *conf)

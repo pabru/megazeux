@@ -34,14 +34,18 @@ EDITOR_LIBSPEC void load_editor_config(struct world *mzx_world, int *argc,
 EDITOR_LIBSPEC void editor_init(void);
 EDITOR_LIBSPEC bool is_editor(void);
 
-/* SAVED POSITIONS
-EDITOR_LIBSPEC void refactor_saved_positions(struct world *mzx_world,
- int *board_id_translation_list);
-*/
-
 int place_current_at_xy(struct world *mzx_world, enum thing id, int color,
- int param, int x, int y, struct robot *copy_robot,
- struct scroll *copy_scroll, struct sensor *copy_sensor, int overlay_edit);
+ int param, int x, int y, struct robot *copy_robot, struct scroll *copy_scroll,
+ struct sensor *copy_sensor, int overlay_edit, int save_history);
+
+void grab_at_xy(struct world *mzx_world, enum thing *new_id,
+ int *new_color, int *new_param, struct robot *copy_robot,
+ struct scroll *copy_scroll, struct sensor *copy_sensor,
+ int x, int y, int overlay_edit);
+
+#define EDIT_BOARD            0
+#define EDIT_OVERLAY          1
+#define EDIT_VLAYER           2
 
 #define EC_MAIN_BOX           25
 #define EC_MAIN_BOX_DARK      16
@@ -54,6 +58,7 @@ int place_current_at_xy(struct world *mzx_world, enum thing id, int color,
 #define EC_CURR_PARAM         23
 #define EC_OPTION             26
 #define EC_HIGHLIGHTED_OPTION 31
+#define EC_DEFAULT_COLOR      28
 #define EC_NA_FILL            1
 
 __M_END_DECLS

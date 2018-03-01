@@ -28,13 +28,7 @@ __M_BEGIN_DECLS
 
 #include "macro.h"
 
-struct jump_point
-{
-  int board_id;
-  int dest_x;
-  int dest_y;
-  char name[BOARD_NAME_SIZE + 1];
-};
+#define NUM_SAVED_POSITIONS 10
 
 struct editor_config_info
 {
@@ -42,6 +36,8 @@ struct editor_config_info
   int editor_space_toggles;
   int bedit_hhelp;
   int editor_tab_focuses_view;
+  int editor_load_board_assets;
+  int editor_thing_menu_places;
 
   // Defaults for new boards
   int viewport_x;
@@ -60,6 +56,7 @@ struct editor_config_info
   int forest_to_floor;
   int collect_bombs;
   int restart_if_hurt;
+  int reset_on_entry;
   int player_locked_ns;
   int player_locked_ew;
   int player_locked_att;
@@ -67,6 +64,11 @@ struct editor_config_info
   int explosions_leave;
   int saving_enabled;
   int overlay_enabled;
+  char charset_path[MAX_PATH];
+  char palette_path[MAX_PATH];
+
+  // Palette editor options
+  int pedit_hhelp;
 
   // Char editor options
   int undo_history_size;
@@ -90,9 +92,13 @@ struct editor_config_info
   int num_macros_allocated;
   struct ext_macro **extended_macros;
 
-  // Jump points
-  int num_jump_points;
-  struct jump_point *jump_points;
+  // Saved positions
+  int saved_board[NUM_SAVED_POSITIONS];
+  int saved_cursor_x[NUM_SAVED_POSITIONS];
+  int saved_cursor_y[NUM_SAVED_POSITIONS];
+  int saved_scroll_x[NUM_SAVED_POSITIONS];
+  int saved_scroll_y[NUM_SAVED_POSITIONS];
+  int saved_debug_x[NUM_SAVED_POSITIONS];
 };
 
 typedef void (* editor_config_function)(struct editor_config_info *conf,

@@ -71,14 +71,16 @@ enum
 #define NO_BOARD              255
 #define NO_ENDGAME_BOARD      255
 #define NO_DEATH_BOARD        255
+#define TEMPORARY_BOARD       255
 #define DEATH_SAME_POS        254
 
 #define NO_KEY                127
 
-// "SIZE" includes terminating \0
+// "BOARD_NAME_SIZE" includes terminating \0
 // This is legacy, for world format only
-#define NUM_BOARDS            250
+#define MAX_BOARDS            250
 #define BOARD_NAME_SIZE       25
+#define MAX_BOARD_SIZE        16 * 1024 * 1024
 
 // This is legacy, for status counters only
 #define COUNTER_NAME_SIZE     15

@@ -42,17 +42,27 @@ bool __update_event_status(void)
   return retval;
 }
 
-void __wait_event(void)
+void __wait_event(int timeout)
 {
   NDSEvent event;
+
+  if (timeout) delay(timeout);
 
   while(!nds_event_poll(&event))
     swiWaitForVBlank();
   process_event(&event);
 }
 
-void real_warp_mouse(Uint32 x, Uint32 y)
+void real_warp_mouse(int x, int y)
 {
+  const struct buffered_status *status = load_status();
+
+  if(x < 0)
+    x = status->real_mouse_x;
+
+  if(y < 0)
+    y = status->real_mouse_y;
+
   // Since we can't warp a touchscreen stylus, focus there instead.
   focus_pixel(x, y);
 }
@@ -133,7 +143,7 @@ static void do_unicode_key_event(struct buffered_status *status, bool down,
 static void do_key_event(struct buffered_status *status, bool down,
  enum keycode code)
 {
-  do_unicode_key_event(status, down, code, code);
+  do_unicode_key_event(status, down, code, code >= 32 && code <= 126 ? code : 0);
 }
 
 // Send a joystick button up/down event to MZX.
@@ -165,6 +175,8 @@ static bool process_event(NDSEvent *event)
       }
       key_down = true;
     }
+
+    /* fallthrough */
 
     // Continuing from NDS_EVENT_KEY_DOWN...
     case NDS_EVENT_KEY_UP:
@@ -221,6 +233,8 @@ static bool process_event(NDSEvent *event)
     {
       key_down = true;
     }
+
+    /* fallthrough */
 
     // Continuing from NDS_EVENT_KEYBOARD_UP...
     case NDS_EVENT_KEYBOARD_UP:

@@ -2,6 +2,7 @@
  *
  * Copyright (C) 1996 Greg Janson
  * Copyright (C) 2004 Gilead Kutnick <exophase@adelphia.net>
+ * Copyright (C) 2017 Alice Rowan <petrifiedrowan@gmail.com>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
@@ -24,22 +25,785 @@
 #include <ctype.h>
 #include <assert.h>
 
+#include "board.h"
 #include "const.h"
-#include "game.h"
-#include "game2.h"
-#include "idarray.h"
-#include "graphics.h"
+#include "error.h"
 #include "event.h"
 #include "expr.h"
-#include "window.h"
-#include "scrdisp.h"
-#include "robot.h"
-#include "board.h"
-#include "world.h"
-#include "util.h"
-#include "rasm.h"
+#include "game.h"
+#include "game2.h"
+#include "graphics.h"
+#include "idarray.h"
 #include "legacy_rasm.h"
-#include "validation.h"
+#include "memfile.h"
+#include "robot.h"
+#include "rasm.h"
+#include "scrdisp.h"
+#include "str.h"
+#include "util.h"
+#include "window.h"
+#include "world.h"
+#include "world_prop.h"
+#include "zip.h"
+
+
+void create_blank_robot(struct robot *cur_robot)
+{
+  int i;
+
+  // Clear the robot before use.
+  cur_robot->robot_name[0] = 0;
+  cur_robot->robot_char = 'R';
+
+  cur_robot->stack = NULL;
+  cur_robot->stack_size = 0;
+  cur_robot->stack_pointer = 0;
+
+  cur_robot->label_list = NULL;
+  cur_robot->num_labels = 0;
+
+  cur_robot->program_bytecode_length = 0;
+  cur_robot->program_bytecode = NULL;
+  cur_robot->program_source_length = 0;
+  cur_robot->program_source = NULL;
+
+  cur_robot->cur_prog_line = 1;
+  cur_robot->pos_within_line = 0;
+  cur_robot->robot_cycle = 0;
+  cur_robot->cycle_count = 0;
+  cur_robot->bullet_type = 1;
+  cur_robot->is_locked = 0;
+  cur_robot->can_lavawalk = 0;
+  cur_robot->can_goopwalk = 0;
+  cur_robot->walk_dir = 0;
+  cur_robot->last_touch_dir = 0;
+  cur_robot->last_shot_dir = 0;
+  cur_robot->xpos = -1;
+  cur_robot->ypos = -1;
+  cur_robot->status = 0;
+  cur_robot->used = 1;
+
+  cur_robot->loop_count = 0;
+
+  for(i = 0; i<32; i++)
+    cur_robot->local[i] = 0;
+
+#ifdef CONFIG_EDITOR
+  cur_robot->command_map = NULL;
+  cur_robot->command_map_length = 0;
+
+  cur_robot->commands_total = 0;
+  cur_robot->commands_cycle = 0;
+#endif
+}
+
+void create_blank_robot_program(struct robot *cur_robot)
+{
+  // Add a blank robot program to a robot.
+
+#ifdef CONFIG_DEBYTECODE
+  cur_robot->program_source_length = 2;
+  cur_robot->program_source = cmalloc(2);
+  strcpy(cur_robot->program_source, "\n");
+#else
+  cur_robot->program_bytecode_length = 2;
+  cur_robot->program_bytecode = cmalloc(2);
+  strcpy(cur_robot->program_bytecode, "\xFF");
+#endif
+}
+
+
+#define err_if_skipped(idn) if(last_ident < idn) { goto err_invalid; }
+
+static int load_robot_from_memory(struct world *mzx_world, struct robot *cur_robot,
+ struct memfile *mf, int savegame, int file_version)
+{
+  struct memfile prop;
+  int last_ident = -1;
+  int ident;
+  int size;
+  int i;
+
+  create_blank_robot(cur_robot);
+
+  while(next_prop(&prop, &ident, &size, mf))
+  {
+    switch(ident)
+    {
+      case RPROP_EOF:
+        mfseek(mf, 0, SEEK_END);
+        break;
+
+      case RPROP_ROBOT_NAME:
+        mfread(cur_robot->robot_name, 15, 1, &prop);
+        break;
+
+      case RPROP_ROBOT_CHAR:
+        err_if_skipped(RPROP_ROBOT_NAME);
+        cur_robot->robot_char = load_prop_int(size, &prop);
+        break;
+
+      case RPROP_XPOS:
+        err_if_skipped(RPROP_ROBOT_CHAR);
+        cur_robot->xpos = (signed short) load_prop_int(size, &prop);
+        break;
+
+      case RPROP_YPOS:
+        err_if_skipped(RPROP_XPOS);
+        cur_robot->ypos = (signed short) load_prop_int(size, &prop);
+        break;
+
+      // Legacy world, now save
+      case RPROP_CUR_PROG_LINE:
+#ifdef CONFIG_DEBYTECODE
+        // Legacy bytecode and DBC bytecode don't necessarily correspond.
+        if(file_version < VERSION_SOURCE) break;
+#endif
+        cur_robot->cur_prog_line = load_prop_int(size, &prop);
+        break;
+
+      case RPROP_POS_WITHIN_LINE:
+#ifdef CONFIG_DEBYTECODE
+        // Legacy bytecode and DBC bytecode don't necessarily correspond.
+        if(file_version < VERSION_SOURCE) break;
+#endif
+        cur_robot->pos_within_line = load_prop_int(size, &prop);
+        break;
+
+      case RPROP_ROBOT_CYCLE:
+        cur_robot->robot_cycle = load_prop_int(size, &prop);
+        break;
+
+      case RPROP_CYCLE_COUNT:
+        cur_robot->cycle_count = load_prop_int(size, &prop);
+        break;
+
+      case RPROP_BULLET_TYPE:
+        cur_robot->bullet_type = load_prop_int(size, &prop);
+        break;
+
+      case RPROP_IS_LOCKED:
+        cur_robot->is_locked = load_prop_int(size, &prop);
+        break;
+
+      case RPROP_CAN_LAVAWALK:
+        cur_robot->can_lavawalk = load_prop_int(size, &prop);
+        break;
+
+      case RPROP_WALK_DIR:
+        cur_robot->walk_dir = load_prop_int(size, &prop);
+        break;
+
+      case RPROP_LAST_TOUCH_DIR:
+        cur_robot->last_touch_dir = load_prop_int(size, &prop);
+        break;
+
+      case RPROP_LAST_SHOT_DIR:
+        cur_robot->last_shot_dir = load_prop_int(size, &prop);
+        break;
+
+      case RPROP_STATUS:
+        cur_robot->status = load_prop_int(size, &prop);
+        break;
+
+      // Legacy save
+      case RPROP_LOOP_COUNT:
+        cur_robot->loop_count = load_prop_int(size, &prop);
+        break;
+
+      case RPROP_LOCALS:
+        for(i = 0; i < 32; i++)
+          cur_robot->local[i] = mfgetd(&prop);
+        break;
+
+      case RPROP_STACK_POINTER:
+        cur_robot->stack_pointer = load_prop_int(size, &prop);
+        break;
+
+      case RPROP_STACK:
+        // Valid # of stack values (doubles) is file size /4
+        size /= 4;
+        cur_robot->stack_size = size;
+        cur_robot->stack = cmalloc(size * sizeof(int));
+        for(i = 0; i < size; i++)
+          cur_robot->stack[i] = mfgetd(&prop);
+        break;
+
+      // New
+      case RPROP_CAN_GOOPWALK:
+        cur_robot->can_goopwalk = load_prop_int(size, &prop);
+        break;
+
+      // Slated for separation
+#ifdef CONFIG_DEBYTECODE
+
+      case RPROP_PROGRAM_MAP:
+      {
+#ifdef CONFIG_EDITOR
+        err_if_skipped(RPROP_YPOS);
+
+        if(cur_robot->command_map)
+          break;
+
+        if(savegame && mzx_world->editing)
+        {
+          cur_robot->command_map = cmalloc(size);
+          cur_robot->command_map_length = size / sizeof(struct command_mapping);
+
+          for(i = 0; i < cur_robot->command_map_length; i++)
+          {
+            cur_robot->command_map[i].real_line = mfgetd(&prop);
+            cur_robot->command_map[i].bc_pos = mfgetd(&prop);
+            cur_robot->command_map[i].src_pos = mfgetd(&prop);
+          }
+        }
+#endif
+        break;
+      }
+
+      case RPROP_PROGRAM_SOURCE:
+      {
+        err_if_skipped(RPROP_YPOS);
+
+        if(cur_robot->program_source)
+          break;
+
+#ifdef CONFIG_EDITOR
+        if(!savegame || mzx_world->editing)
+#else
+        if(!savegame)
+#endif
+        {
+          // This program is source, just load it straight
+          cur_robot->program_source = cmalloc(size + 1);
+          cur_robot->program_source_length = size;
+
+          mfread(cur_robot->program_source, size, 1, &prop);
+
+          cur_robot->program_source[size] = 0;
+        }
+
+        break;
+      }
+
+      case RPROP_PROGRAM_BYTECODE:
+      {
+        err_if_skipped(RPROP_YPOS);
+
+        if(cur_robot->program_bytecode)
+          break;
+
+        // Load legacy bytecode, and compile it, if necessary.
+        if(file_version < VERSION_SOURCE)
+        {
+          char *program_legacy_bytecode = (char *)prop.start;
+          int v_size;
+
+          v_size = validate_legacy_bytecode(program_legacy_bytecode, size);
+
+          if(v_size < 0)
+            goto err_invalid;
+
+          cur_robot->program_bytecode = NULL;
+          cur_robot->program_bytecode_length = 0;
+
+          cur_robot->program_source =
+           legacy_disassemble_program(program_legacy_bytecode, v_size,
+            &(cur_robot->program_source_length), true, 10);
+
+          // Compile the bytecode if this is a savegame
+          if(savegame)
+          {
+            prepare_robot_bytecode(mzx_world, cur_robot);
+
+            // These won't necessary correspond to anything meaningful now.
+            // Reset them to the start of the robot.
+            if(cur_robot->cur_prog_line)
+              cur_robot->cur_prog_line = 1;
+
+            cur_robot->pos_within_line = 0;
+          }
+        }
+        else
+
+        // Load bytecode if this is a savegame
+        if(savegame)
+        {
+          // FIXME needs validation
+          cur_robot->program_bytecode = cmalloc(size);
+          cur_robot->program_bytecode_length = size;
+          mfread(cur_robot->program_bytecode, size, 1, &prop);
+        }
+
+        if(cur_robot->program_bytecode)
+        {
+          // Create the label cache for this robot
+          cur_robot->label_list =
+           cache_robot_labels(cur_robot, &cur_robot->num_labels);
+        }
+
+        break;
+      }
+
+#else /* !CONFIG_DEBYTECODE */
+
+      case RPROP_PROGRAM_BYTECODE:
+      {
+        err_if_skipped(RPROP_YPOS);
+
+        if(cur_robot->program_bytecode)
+          break;
+
+        if(size > 0)
+        {
+          int v_size;
+          cur_robot->program_bytecode = cmalloc(size);
+
+          mfread(cur_robot->program_bytecode, size, 1, &prop);
+
+          v_size = validate_legacy_bytecode(cur_robot->program_bytecode, size);
+
+          if(v_size <= 0)
+            goto err_invalid;
+
+          else if(v_size < size)
+            cur_robot->program_bytecode =
+             crealloc(cur_robot->program_bytecode, v_size);
+
+          cur_robot->program_bytecode_length = v_size;
+
+          // Create the label cache for this robot
+          cur_robot->label_list =
+           cache_robot_labels(cur_robot, &cur_robot->num_labels);
+        }
+        break;
+      }
+
+#endif /* !CONFIG_DEBYTECODE */
+
+      default:
+        break;
+    }
+    last_ident = ident;
+  }
+
+  if(!cur_robot->program_bytecode)
+#ifdef CONFIG_DEBYTECODE
+    if(!cur_robot->program_source)
+#endif
+      // This looks silly, but the checks above can also error.
+      goto err_invalid;
+
+  return 0;
+
+err_invalid:
+  // One of the essential fields of the robot is missing altogether.
+
+  // Nuke the robot
+  clear_robot_contents(cur_robot);
+  create_blank_robot(cur_robot);
+  create_blank_robot_program(cur_robot);
+  strcpy(cur_robot->robot_name, "<<error>>");
+  cur_robot->cur_prog_line = 0;
+
+  // Trigger error message
+  return -1;
+}
+
+void load_robot(struct world *mzx_world, struct robot *cur_robot,
+ struct zip_archive *zp, int savegame, int file_version)
+{
+  char *buffer = NULL;
+  size_t actual_size;
+  struct memfile mf;
+
+  unsigned int method;
+  unsigned int board_id;
+  unsigned int id;
+
+  zip_get_next_prop(zp, NULL, &board_id, &id);
+  zip_get_next_method(zp, &method);
+
+  // We aren't saving or loading null robots.
+  cur_robot->world_version = mzx_world->version;
+  cur_robot->used = 1;
+
+  // If this is an uncompressed memory zip, we can read the memory directly.
+  if(zp->is_memory && method == ZIP_M_NONE)
+  {
+    zip_read_open_mem_stream(zp, &mf);
+  }
+
+  else
+  {
+    zip_get_next_uncompressed_size(zp, &actual_size);
+    buffer = cmalloc(actual_size);
+    zip_read_file(zp, buffer, actual_size, &actual_size);
+
+    mfopen_static(buffer, actual_size, &mf);
+  }
+
+  if(load_robot_from_memory(mzx_world, cur_robot, &mf, savegame, file_version))
+  {
+    error_message(E_BOARD_ROBOT_CORRUPT, (board_id << 8)|id, NULL);
+  }
+
+  if(zp->is_memory && method == ZIP_M_NONE)
+  {
+    zip_read_close_mem_stream(zp);
+  }
+
+  else
+  {
+    free(buffer);
+  }
+}
+
+struct robot *load_robot_allocate(struct world *mzx_world,
+ struct zip_archive *zp, int savegame, int file_version)
+{
+  struct robot *cur_robot = cmalloc(sizeof(struct robot));
+
+  load_robot(mzx_world, cur_robot, zp, savegame, file_version);
+
+  return cur_robot;
+}
+
+struct scroll *load_scroll_allocate(struct zip_archive *zp)
+{
+  struct scroll *cur_scroll = ccalloc(1, sizeof(struct scroll));
+
+  size_t actual_size;
+  void *buffer;
+  struct memfile mf;
+  struct memfile prop;
+  int ident;
+  int size;
+
+  zip_get_next_uncompressed_size(zp, &actual_size);
+  buffer = cmalloc(actual_size);
+
+  // We aren't saving or loading null scrolls.
+  cur_scroll->used = 1;
+
+  zip_read_file(zp, buffer, actual_size, &actual_size);
+
+  mfopen_static(buffer, actual_size, &mf);
+
+  while(next_prop(&prop, &ident, &size, &mf))
+  {
+    switch(ident)
+    {
+      case SCRPROP_EOF:
+        mfseek(&mf, 0, SEEK_END);
+        break;
+
+      case SCRPROP_NUM_LINES:
+        cur_scroll->num_lines = load_prop_int(size, &prop);
+        break;
+
+      case SCRPROP_MESG:
+        cur_scroll->mesg_size = size;
+        cur_scroll->mesg = cmalloc(size);
+        mfread(cur_scroll->mesg, size, 1, &prop);
+        break;
+
+      default:
+        break;
+    }
+  }
+
+  if(!cur_scroll->mesg_size)
+  {
+    // We have an incomplete sensor, so slip in an empty scroll.
+    cur_scroll->num_lines = 1;
+    cur_scroll->mesg_size = 3;
+
+    free(cur_scroll->mesg);
+    cur_scroll->mesg = cmalloc(3);
+    strcpy(cur_scroll->mesg, "\x01\x0A");
+  }
+
+  free(buffer);
+  return cur_scroll;
+}
+
+struct sensor *load_sensor_allocate(struct zip_archive *zp)
+{
+  struct sensor *cur_sensor = ccalloc(1, sizeof(struct sensor));
+
+  size_t actual_size;
+  void *buffer;
+  struct memfile mf;
+  struct memfile prop;
+  int ident;
+  int size;
+
+  zip_get_next_uncompressed_size(zp, &actual_size);
+  buffer = cmalloc(actual_size);
+
+  // We aren't saving or loading null sensors.
+  cur_sensor->used = 1;
+
+  zip_read_file(zp, buffer, actual_size, &actual_size);
+
+  mfopen_static(buffer, actual_size, &mf);
+
+  while(next_prop(&prop, &ident, &size, &mf))
+  {
+    switch(ident)
+    {
+      case SENPROP_EOF:
+        mfseek(&mf, 0, SEEK_END);
+        break;
+
+      case SENPROP_SENSOR_NAME:
+        size = MIN(size, 15);
+        mfread(cur_sensor->sensor_name, size, 1, &prop);
+        break;
+
+      case SENPROP_SENSOR_CHAR:
+        cur_sensor->sensor_char = load_prop_int(size, &prop);
+        break;
+
+      case SENPROP_ROBOT_TO_MESG:
+        size = MIN(size, 15);
+        mfread(cur_sensor->robot_to_mesg, size, 1, &prop);
+        break;
+
+      default:
+        break;
+    }
+  }
+
+  // Zeros work fine as filler for incomplete sensors here
+
+  free(buffer);
+  return cur_sensor;
+}
+
+size_t save_robot_calculate_size(struct world *mzx_world,
+ struct robot *cur_robot, int savegame, int file_version)
+{
+  int size = ROBOT_PROPS_SIZE;
+
+  if(savegame)
+  {
+    size += ROBOT_SAVE_PROPS_SIZE;
+    size += 4 * cur_robot->stack_size;
+  }
+
+#ifdef CONFIG_DEBYTECODE
+
+  if(!savegame)
+  {
+    size += cur_robot->program_source_length;
+  }
+  else
+  {
+    // Make sure this has been done already.
+    prepare_robot_bytecode(mzx_world, cur_robot);
+    size += cur_robot->program_bytecode_length;
+
+#ifdef CONFIG_EDITOR
+    if(mzx_world->editing)
+    {
+      // When editing, save these too.
+      size += ROBOT_DBC_EDIT_PROPS_SIZE;
+
+      size += cur_robot->program_source_length;
+      size += cur_robot->command_map_length *
+       sizeof(struct command_mapping);
+    }
+#endif
+  }
+
+#else // !CONFIG_DEBYTECODE
+
+  size += cur_robot->program_bytecode_length;
+
+#endif // !CONFIG_DEBYTECODE
+
+  return size;
+}
+
+static void save_robot_to_memory(struct robot *cur_robot,
+ struct memfile *mf, int savegame, int file_version)
+{
+  struct memfile prop;
+
+  save_prop_s(RPROP_ROBOT_NAME, cur_robot->robot_name, 15, 1, mf);
+  save_prop_c(RPROP_ROBOT_CHAR, cur_robot->robot_char, mf);
+  save_prop_w(RPROP_XPOS, cur_robot->xpos, mf);
+  save_prop_w(RPROP_YPOS, cur_robot->ypos, mf);
+
+#ifdef CONFIG_DEBYTECODE
+#ifdef CONFIG_EDITOR
+  if(cur_robot->command_map)
+  {
+    int map_len = cur_robot->command_map_length *
+     sizeof(struct command_mapping);
+    int i;
+
+    save_prop_v(RPROP_PROGRAM_MAP, map_len, &prop, mf);
+
+    for(i = 0; i < cur_robot->command_map_length; i++)
+    {
+      mfputd(cur_robot->command_map[i].real_line, &prop);
+      mfputd(cur_robot->command_map[i].bc_pos, &prop);
+      mfputd(cur_robot->command_map[i].src_pos, &prop);
+    }
+  }
+#endif
+
+  if(cur_robot->program_source)
+  {
+    int src_len = cur_robot->program_source_length;
+
+    save_prop_v(RPROP_PROGRAM_SOURCE, src_len, &prop, mf);
+
+    mfwrite(cur_robot->program_source, src_len, 1, &prop);
+  }
+#endif
+
+  if(cur_robot->program_bytecode)
+  {
+    int bc_len = cur_robot->program_bytecode_length;
+
+    save_prop_v(RPROP_PROGRAM_BYTECODE, bc_len, &prop, mf);
+
+    mfwrite(cur_robot->program_bytecode, bc_len, 1, &prop);
+  }
+
+  if(savegame)
+  {
+    int stack_size = cur_robot->stack_size;
+    int i;
+
+    save_prop_d(RPROP_CUR_PROG_LINE, cur_robot->cur_prog_line, mf);
+    save_prop_d(RPROP_POS_WITHIN_LINE, cur_robot->pos_within_line, mf);
+    save_prop_c(RPROP_ROBOT_CYCLE, cur_robot->robot_cycle, mf);
+    save_prop_c(RPROP_CYCLE_COUNT, cur_robot->cycle_count, mf);
+    save_prop_c(RPROP_BULLET_TYPE, cur_robot->bullet_type, mf);
+    save_prop_c(RPROP_IS_LOCKED, cur_robot->is_locked, mf);
+    save_prop_c(RPROP_CAN_LAVAWALK, cur_robot->can_lavawalk, mf);
+    save_prop_c(RPROP_WALK_DIR, cur_robot->walk_dir, mf);
+    save_prop_c(RPROP_LAST_TOUCH_DIR, cur_robot->last_touch_dir, mf);
+    save_prop_c(RPROP_LAST_SHOT_DIR, cur_robot->last_shot_dir, mf);
+    save_prop_c(RPROP_STATUS, cur_robot->status, mf);
+
+    save_prop_d(RPROP_LOOP_COUNT, cur_robot->loop_count, mf);
+    save_prop_v(RPROP_LOCALS, 4*32, &prop, mf);
+
+    for(i = 0; i < 32; i++)
+      mfputd(cur_robot->local[i], &prop);
+
+    save_prop_d(RPROP_STACK_POINTER, cur_robot->stack_pointer, mf);
+    save_prop_v(RPROP_STACK, stack_size * 4, &prop, mf);
+
+    for(i = 0; i < stack_size; i++)
+      mfputd(cur_robot->stack[i], &prop);
+
+    save_prop_c(RPROP_CAN_GOOPWALK, cur_robot->can_goopwalk, mf);
+  }
+
+  save_prop_eof(mf);
+}
+
+void save_robot(struct world *mzx_world, struct robot *cur_robot,
+ struct zip_archive *zp, int savegame, int file_version, const char *name)
+{
+  struct memfile mf;
+  void *buffer = NULL;
+  size_t actual_size = 0;
+
+  if(cur_robot->used)
+  {
+#ifdef CONFIG_DEBYTECODE
+    // This will generally be done when calculating the size.
+    // Since memory zips are expecting this to be done beforehand, do it
+    // again anyway just in case.
+
+    if(savegame)
+      prepare_robot_bytecode(mzx_world, cur_robot);
+#endif
+
+    // The regular way works with memory zips too, but this is faster.
+
+    if(zp->is_memory)
+    {
+      zip_write_open_mem_stream(zp, &mf, name);
+    }
+
+    else
+    {
+      actual_size = save_robot_calculate_size(mzx_world, cur_robot, savegame,
+       file_version);
+      buffer = cmalloc(actual_size);
+
+      mfopen_static(buffer, actual_size, &mf);
+    }
+
+    save_robot_to_memory(cur_robot, &mf, savegame, file_version);
+
+    if(zp->is_memory)
+    {
+      zip_write_close_mem_stream(zp, &mf);
+    }
+
+    else
+    {
+      zip_write_file(zp, name, buffer, actual_size, ZIP_M_NONE);
+
+      free(buffer);
+    }
+  }
+}
+
+void save_scroll(struct scroll *cur_scroll, struct zip_archive *zp,
+ const char *name)
+{
+  void *buffer;
+  struct memfile mf;
+  size_t scroll_size;
+  size_t actual_size;
+
+  if(cur_scroll->used)
+  {
+    scroll_size = cur_scroll->mesg_size;
+    actual_size = scroll_size + SCROLL_PROPS_SIZE;
+
+    buffer = cmalloc(actual_size);
+
+    mfopen_static(buffer, actual_size, &mf);
+
+    save_prop_w(SCRPROP_NUM_LINES, cur_scroll->num_lines, &mf);
+    save_prop_s(SCRPROP_MESG, cur_scroll->mesg, scroll_size, 1, &mf);
+
+    zip_write_file(zp, name, buffer, actual_size, ZIP_M_NONE);
+
+    free(buffer);
+  }
+}
+
+void save_sensor(struct sensor *cur_sensor, struct zip_archive *zp,
+ const char *name)
+{
+  char buffer[SENSOR_PROPS_SIZE];
+  struct memfile mf;
+
+  if(cur_sensor->used)
+  {
+    mfopen_static(buffer, SENSOR_PROPS_SIZE, &mf);
+
+    save_prop_s(SENPROP_SENSOR_NAME, cur_sensor->sensor_name, 15, 1, &mf);
+    save_prop_c(SENPROP_SENSOR_CHAR, cur_sensor->sensor_char, &mf);
+    save_prop_s(SENPROP_ROBOT_TO_MESG, cur_sensor->robot_to_mesg, 15, 1, &mf);
+
+    zip_write_file(zp, name, buffer, SENSOR_PROPS_SIZE, ZIP_M_NONE);
+  }
+}
+
 
 static int cmp_labels(const void *dest, const void *src)
 {
@@ -52,6 +816,8 @@ static int cmp_labels(const void *dest, const void *src)
   {
     if(ldest->position == 0)
       return 1;
+    if(lsrc->position == 0)
+      return -1;
 
     return ldest->position - lsrc->position;
   }
@@ -65,9 +831,6 @@ static int cmp_labels(const void *dest, const void *src)
 // really be done when robots are assembled, rather than when they're loaded.
 // So it's bundled with the function for that.
 
-#ifdef CONFIG_DEBYTECODE
-static
-#endif
 struct label **cache_robot_labels(struct robot *robot, int *num_labels)
 {
   int labels_allocated = 16;
@@ -98,7 +861,7 @@ struct label **cache_robot_labels(struct robot *robot, int *num_labels)
       else
       {
         //compatibility fix for 2.80 to 2.83
-        if (robot->world_version >= 0x0250 && robot->world_version <= 0x0253)
+        if(robot->world_version >= V280 && robot->world_version <= V283)
           current_label->position = next + 1;
         else
           current_label->position = i;
@@ -144,612 +907,6 @@ struct label **cache_robot_labels(struct robot *robot, int *num_labels)
   return label_list;
 }
 
-int get_robot_id(struct board *src_board, const char *name)
-{
-  int first, last;
-
-  if(find_robot(src_board, name, &first, &last))
-  {
-    struct robot *cur_robot = src_board->robot_list_name_sorted[first];
-    // This is a cheap trick for now since robots don't have
-    // a back-reference for ID's
-    int offset = cur_robot->xpos +
-     (cur_robot->ypos * src_board->board_width);
-    enum thing d_id = (enum thing)src_board->level_id[offset];
-
-    if(is_robot(d_id))
-    {
-      return src_board->level_param[offset];
-    }
-    else
-    {
-      int i;
-      for(i = 1; i <= src_board->num_robots; i++)
-      {
-        if(!src_board->robot_list[i])
-          continue;
-        if(!strcasecmp(name, (src_board->robot_list[i])->robot_name))
-          return i;
-      }
-    }
-  }
-
-  return -1;
-}
-
-void create_blank_robot(struct robot *r, int savegame)
-{
-  int i;
-
-  free(r->program_bytecode);
-  r->program_bytecode = NULL;
-  r->program_bytecode_length = 0;
-
-#ifdef CONFIG_DEBYTECODE
-  {
-    free(r->program_source);
-
-    r->program_source_length = 2;
-    r->program_source = cmalloc(2);
-    strcpy(r->program_source, "\x0A"); // Linebreak then term
-
-    // Compile our blank program please, snicker
-    prepare_robot_bytecode(r);
-  }
-#else /* !CONFIG_DEBYTECODE */
-  {
-    r->program_bytecode_length = 2;
-    r->program_bytecode = cmalloc(2);
-    strcpy(r->program_bytecode, "\xFF"); // Blank program, -1 then 0
-  }
-#endif
-
-  strcpy(r->robot_name, "<<empty>>");
-  r->robot_char = 'R';
-  r->cur_prog_line = 1;
-  r->pos_within_line = 0;
-  r->robot_cycle = 1;
-  r->cycle_count = 0;
-  r->bullet_type = 0;
-  r->is_locked = 1;
-  r->can_lavawalk = 1;
-  r->walk_dir = IDLE;
-  r->last_touch_dir = IDLE;
-  r->last_shot_dir = IDLE;
-  r->xpos = -1;
-  r->ypos = -1;
-  r->status = 0;
-  r->used = 1;
-  r->loop_count = 0;
-  for(i = 0; i<32; i++)
-    r->local[i] = 0;
-
-  free(r->label_list);
-  r->num_labels = 0;
-  r->label_list = NULL;
-
-  free(r->stack);
-  r->stack_size = 0;
-  r->stack_pointer = 0;
-  r->stack = NULL;
-
-}
-
-struct robot *load_robot_allocate(FILE *fp, int savegame, int file_version,
- int world_version)
-{
-  struct robot *cur_robot = cmalloc(sizeof(struct robot));
-
-  cur_robot->world_version = world_version;
-  load_robot(cur_robot, fp, savegame, file_version);
-  return cur_robot;
-}
-
-// Most of this stuff does not have to be loaded unless savegame
-// is set.
-void load_robot(struct robot *cur_robot, FILE *fp, int savegame, int version)
-{
-  int program_length, validated_length;
-  int i;
-
-  int robot_location = ftell(fp);
-
-  cur_robot->stack = NULL;
-  cur_robot->label_list = NULL;
-  cur_robot->program_bytecode = NULL;
-  cur_robot->num_labels = 0;
-
-#ifdef CONFIG_DEBYTECODE
-  cur_robot->program_source = NULL;
-
-  if(version >= VERSION_PROGRAM_SOURCE)
-  {
-    program_length = fgetd(fp);
-  }
-  else
-#endif
-  {
-    program_length = fgetw(fp);
-    fseek(fp, 2, SEEK_CUR);
-  }
-
-  if(program_length == EOF)
-  {
-    val_error(WORLD_ROBOT_MISSING, robot_location);
-    goto err_out;
-  }
-
-  fread(cur_robot->robot_name, 15, 1, fp);
-  cur_robot->robot_char = fgetc(fp);
-  cur_robot->cur_prog_line = fgetw(fp);
-  cur_robot->pos_within_line = fgetc(fp);
-  cur_robot->robot_cycle = fgetc(fp);
-  cur_robot->cycle_count = fgetc(fp);
-  cur_robot->bullet_type = fgetc(fp);
-  cur_robot->is_locked = fgetc(fp);
-  cur_robot->can_lavawalk = fgetc(fp);
-  cur_robot->walk_dir = (enum dir)fgetc(fp);
-  cur_robot->last_touch_dir = (enum dir)fgetc(fp);
-  cur_robot->last_shot_dir = (enum dir)fgetc(fp);
-  cur_robot->xpos = fgetw(fp);
-  cur_robot->ypos = fgetw(fp);
-  cur_robot->status = fgetc(fp);
-  // Skip local - these are in the save files now
-  fseek(fp, 2, SEEK_CUR);
-  cur_robot->used = fgetc(fp);
-  if(version <= 0x0253)
-    cur_robot->loop_count = fgetw(fp);
-  else
-    fseek(fp, 2, SEEK_CUR);
-
-  // Periodic EOF check
-  if(cur_robot->ypos < 0)
-    goto err_invalid;
-
-  // Fix xpos and ypos for global robot
-  cur_robot->xpos = -(cur_robot->xpos >= 32768) | cur_robot->xpos;
-  cur_robot->ypos = -(cur_robot->ypos >= 32768) | cur_robot->ypos;
-
-  // If savegame, there's some additional information to get
-  if(savegame)
-  {
-    int stack_size;
-
-    if(version >= 0x0254)
-      cur_robot->loop_count = fgetd(fp);
-
-    for(i = 0; i < 32; i++)
-      cur_robot->local[i] = fgetd(fp);
-
-    stack_size = fgetd(fp);
-    cur_robot->stack_pointer = fgetd(fp);
-
-    if(stack_size == EOF)
-      goto err_invalid;
-
-    cur_robot->stack = ccalloc(stack_size, sizeof(int));
-    for(i = 0; i < stack_size; i++)
-      cur_robot->stack[i] = fgetd(fp);
-
-    cur_robot->stack_size = stack_size;
-
-#ifdef CONFIG_DEBYTECODE
-    // We're allowing legacy save robots to be loaded because lancer-x is
-    // a bad person and relies on savegame type MZMs (even though he claims
-    // to have made them in the editor)
-
-    if(version < VERSION_PROGRAM_SOURCE)
-    {
-      // The program is bytecode and we have to convert it to sourcecode.
-      char *program_legacy_bytecode = cmalloc(program_length);
-
-      if(!fread(program_legacy_bytecode, program_length, 1, fp))
-      {
-        free(program_legacy_bytecode);
-        goto err_invalid;
-      }
-
-      validated_length = validate_legacy_bytecode(program_legacy_bytecode, program_length);
-
-      if(validated_length <= 0)
-        goto err_invalid;
-
-      else if(validated_length < program_length)
-      {
-        program_legacy_bytecode = crealloc(program_legacy_bytecode, validated_length);
-        program_length = validated_length;
-      }
-
-      cur_robot->program_bytecode = NULL;
-      cur_robot->program_source =
-       legacy_disassemble_program(program_legacy_bytecode, program_length,
-       &(cur_robot->program_source_length), true, 10);
-
-      free(program_legacy_bytecode);
-      prepare_robot_bytecode(cur_robot);
-
-      // And if you thought that lancer-x was a bad person for relying
-      // on in-game saved MZMs then you should also know that these
-      // these had robots that MZMs weren't at start position. Fortunately,
-      // they were working more in spite of it than because of it, so
-      // they're safe to nudge back.
-
-      if(cur_robot->cur_prog_line)
-        cur_robot->cur_prog_line = 1;
-    }
-    else
-    {
-      // Save file loads bytecode. This also means that we can't ever
-      // ever edit save files, so make them null. In practice this
-      // shouldn't be possible though.
-
-      // TODO: We need to validate new bytecode too
-      cur_robot->program_bytecode = cmalloc(program_length);
-      cur_robot->program_bytecode_length = program_length;
-      if(!fread(cur_robot->program_bytecode, program_length, 1, fp))
-        goto err_invalid;
-
-    }
-
-    cur_robot->program_source = NULL;
-    cur_robot->program_source_length = 0;
-
-    // TODO: This has to be made part of what's saved one day.
-    cur_robot->label_list =
-     cache_robot_labels(cur_robot, &cur_robot->num_labels);
-
-#endif /* CONFIG_DEBYTECODE */
-  }
-  else
-  {
-    // Otherwise, allocate some stuff; local counters are 0
-    cur_robot->loop_count = 0;
-    memset(cur_robot->local, 0, sizeof(int) * 32);
-
-    // Give an empty stack.
-    cur_robot->stack_size = 0;
-    cur_robot->stack = NULL;
-
-    // Initialize the stack pointer to the bottom
-    cur_robot->stack_pointer = 0;
-
-#ifdef CONFIG_DEBYTECODE
-    // World file loads source code.
-    if(version < VERSION_PROGRAM_SOURCE)
-    {
-      if((cur_robot->used) || (program_length >= 2))
-      {
-        // The program is bytecode and we have to convert it to sourcecode.
-        char *program_legacy_bytecode = cmalloc(program_length);
-        if(!fread(program_legacy_bytecode, program_length, 1, fp))
-        {
-          free(program_legacy_bytecode);
-          goto err_invalid;
-        }
-
-        validated_length = validate_legacy_bytecode(program_legacy_bytecode, program_length);
-
-        if(validated_length <= 0)
-          goto err_invalid;
-
-        else if(validated_length < program_length)
-        {
-          program_legacy_bytecode = crealloc(program_legacy_bytecode, validated_length);
-          program_length = validated_length;
-        }
-
-        cur_robot->program_source =
-         legacy_disassemble_program(program_legacy_bytecode, program_length,
-         &(cur_robot->program_source_length), true, 10);
-        free(program_legacy_bytecode);
-      }
-      else
-      {
-        // Skip over program, we're not going to use it.
-        fseek(fp, program_length, SEEK_CUR);
-        cur_robot->program_source = NULL;
-        cur_robot->program_source_length = 0;
-      }
-    }
-    else
-    {
-      // This program is source, just load it straight
-      cur_robot->program_source = cmalloc(program_length + 1);
-      cur_robot->program_source_length = program_length;
-
-      if(!fread(cur_robot->program_source, program_length, 1, fp))
-        goto err_invalid;
-
-      cur_robot->program_source[program_length] = 0;
-    }
-
-    // This will become non-null when the robot's executed.
-    cur_robot->program_bytecode = NULL;
-    cur_robot->program_bytecode_length = 0;
-#endif /* CONFIG_DEBYTECODE */
-  }
-
-#ifndef CONFIG_DEBYTECODE
-  cur_robot->program_bytecode_length = program_length;
-  if(program_length > 0)
-  {
-    cur_robot->program_bytecode = cmalloc(program_length);
-
-    if(!fread(cur_robot->program_bytecode, program_length, 1, fp))
-      goto err_invalid;
-
-    validated_length = validate_legacy_bytecode(cur_robot->program_bytecode, program_length);
-
-    if(validated_length <= 0)
-      goto err_invalid;
-
-    else if(validated_length < program_length)
-    {
-      cur_robot->program_bytecode = crealloc(cur_robot->program_bytecode, validated_length);
-      cur_robot->program_bytecode_length = validated_length;
-    }
-
-    // Now create a label cache IF the robot is in use
-    if(cur_robot->used)
-    {
-      cur_robot->label_list =
-       cache_robot_labels(cur_robot, &cur_robot->num_labels);
-    }
-  }
-#endif /* !CONFIG_DEBYTECODE */
-
-  return;
-
-err_invalid:
-  // Don't worry about the unused source and bytecode
-  // that were allocated, they'll be cleared later.
-  val_error(BOARD_ROBOT_CORRUPT, robot_location);
-err_out:
-  create_blank_robot(cur_robot, savegame);
-}
-
-static void robot_stack_push(struct robot *cur_robot, int value)
-{
-  int stack_pointer = cur_robot->stack_pointer;
-  int stack_size = cur_robot->stack_size;
-  int *stack = cur_robot->stack;
-
-  if((stack_pointer + 1) >= stack_size)
-  {
-    // Initialize or double the stack. Don't let it get too large though!
-    if(stack_size == 0)
-      stack_size = 1;
-    else
-      stack_size *= 2;
-
-    if(stack_size > ROBOT_MAX_STACK)
-      return;
-
-    cur_robot->stack = crealloc(stack, stack_size * sizeof(int));
-    stack = cur_robot->stack;
-    cur_robot->stack_size = stack_size;
-  }
-
-  stack[stack_pointer] = value;
-  cur_robot->stack_pointer = stack_pointer + 1;
-}
-
-static int robot_stack_pop(struct robot *cur_robot)
-{
-  int stack_pointer = cur_robot->stack_pointer;
-
-  if(stack_pointer)
-  {
-    stack_pointer--;
-    cur_robot->stack_pointer = stack_pointer;
-    return cur_robot->stack[stack_pointer];
-  }
-  else
-  {
-    return -1;
-  }
-}
-
-static void load_scroll(struct scroll *cur_scroll, FILE *fp)
-{
-  int scroll_size;
-
-  cur_scroll->mesg = NULL;
-  cur_scroll->num_lines = fgetw(fp);
-  fseek(fp, 2, SEEK_CUR); // Skip junk
-  scroll_size = fgetw(fp);
-  cur_scroll->mesg_size = scroll_size;
-  cur_scroll->used = fgetc(fp);
-
-  if(scroll_size < 0)
-    goto scroll_err;
-
-  cur_scroll->mesg = cmalloc(scroll_size);
-  if(!fread(cur_scroll->mesg, scroll_size, 1, fp))
-    goto scroll_err;
-
-  return;
-
-scroll_err:
-  // Something screwed up, slip in an empty scroll.
-  cur_scroll->num_lines = 1;
-  cur_scroll->mesg_size = 3;
-  cur_scroll->used = 1;
-
-  free(cur_scroll->mesg);
-  cur_scroll->mesg = cmalloc(3);
-  strcpy(cur_scroll->mesg, "\x01\x0A");
-}
-
-struct scroll *load_scroll_allocate(FILE *fp)
-{
-  struct scroll *cur_scroll = cmalloc(sizeof(struct scroll));
-  load_scroll(cur_scroll, fp);
-  return cur_scroll;
-}
-
-static void load_sensor(struct sensor *cur_sensor, FILE *fp)
-{
-  if(!fread(cur_sensor->sensor_name, 15, 1, fp))
-    goto sensor_err;
-
-  cur_sensor->sensor_char = fgetc(fp);
-
-  if(!fread(cur_sensor->robot_to_mesg, 15, 1, fp))
-    goto sensor_err;
-
-  cur_sensor->used = fgetc(fp);
-
-  return;
-
-sensor_err:
-  // Something screwed up, insert filler
-  strcpy(cur_sensor->sensor_name, "");
-  strcpy(cur_sensor->robot_to_mesg, "");
-  cur_sensor->sensor_char = 'S';
-  cur_sensor->used = 1;
-}
-
-struct sensor *load_sensor_allocate(FILE *fp)
-{
-  struct sensor *cur_sensor = cmalloc(sizeof(struct sensor));
-  load_sensor(cur_sensor, fp);
-  return cur_sensor;
-}
-
-void save_robot(struct robot *cur_robot, FILE *fp, int savegame, int version)
-{
-  int program_length;
-  int i;
-
-#ifdef CONFIG_DEBYTECODE
-  // Write the program's source code if it's a world file, or the
-  // bytecode if it's a save file. For save files we currently must write
-  // bytecode because it stores the zap status inside the programs
-  // themselves (even though it's in the label cache as well).
-
-  if(savegame)
-  {
-    prepare_robot_bytecode(cur_robot);
-    program_length = cur_robot->program_bytecode_length;
-  }
-  else
-  {
-    program_length = cur_robot->program_source_length;
-  }
-
-  // As of 2.83 we're writing out 4 byte sizes.
-  fputd(program_length, fp);
-#else /* !CONFIG_DEBYTECODE */
-  program_length = cur_robot->program_bytecode_length;
-  fputw(program_length, fp);
-  // Junk
-  fputw(0, fp);
-#endif /* !CONFIG_DEBYTECODE */
-
-  fwrite(cur_robot->robot_name, 15, 1, fp);
-  fputc(cur_robot->robot_char, fp);
-  if(savegame)
-  {
-    fputw(cur_robot->cur_prog_line, fp);
-    fputc(cur_robot->pos_within_line, fp);
-    fputc(cur_robot->robot_cycle, fp);
-    fputc(cur_robot->cycle_count, fp);
-    fputc(cur_robot->bullet_type, fp);
-    fputc(cur_robot->is_locked, fp);
-    fputc(cur_robot->can_lavawalk, fp);
-    fputc(cur_robot->walk_dir, fp);
-    fputc(cur_robot->last_touch_dir, fp);
-    fputc(cur_robot->last_shot_dir, fp);
-    fputw(cur_robot->xpos, fp);
-    fputw(cur_robot->ypos, fp);
-    fputc(cur_robot->status, fp);
-  }
-  else
-  {
-    // Put some "default" values here instead
-    fputw(1, fp);
-    fputc(0, fp);
-    fputc(0, fp);
-    fputc(0, fp);
-    fputc(1, fp);
-    fputc(0, fp);
-    fputc(0, fp);
-    fputc(0, fp);
-    fputc(0, fp);
-    fputc(0, fp);
-    fputw(cur_robot->xpos, fp);
-    fputw(cur_robot->ypos, fp);
-    fputc(0, fp);
-  }
-
-  // Junk local
-  fputw(0, fp);
-  fputc(cur_robot->used, fp);
-  // loop_count
-  if(version <= 0x0253)
-    fputw(cur_robot->loop_count, fp);
-  else // junk
-    fputw(0, fp);
-
-  // If savegame, there's some additional information to get
-  if(savegame)
-  {
-    int stack_size = cur_robot->stack_size;
-
-    // Write the local counters
-    if(version >= 0x0254)
-      fputd(cur_robot->loop_count, fp);
-
-    for(i = 0; i < 32; i++)
-    {
-      fputd(cur_robot->local[i], fp);
-    }
-
-    // Put the stack size
-    fputd(stack_size, fp);
-    // Put the stack pointer
-    fputd(cur_robot->stack_pointer, fp);
-    // Put the stack
-
-    for(i = 0; i < stack_size; i++)
-    {
-      fputd(cur_robot->stack[i], fp);
-    }
-  }
-
-#ifdef CONFIG_DEBYTECODE
-  // NOTE: This will one day be a good thing to move out of the save game;
-  // this will require that the programs become immutable and thus have
-  // the zap status stored somewhere else.
-
-  if(!savegame)
-    fwrite(cur_robot->program_source, program_length, 1, fp);
-  else
-#endif
-    fwrite(cur_robot->program_bytecode, program_length, 1, fp);
-}
-
-void save_scroll(struct scroll *cur_scroll, FILE *fp, int savegame)
-{
-  int scroll_size = (int)cur_scroll->mesg_size;
-
-  fputw(cur_scroll->num_lines, fp);
-  fputw(0, fp);
-  fputw(scroll_size, fp);
-  fputc(cur_scroll->used, fp);
-
-  fwrite(cur_scroll->mesg, scroll_size, 1, fp);
-}
-
-void save_sensor(struct sensor *cur_sensor, FILE *fp, int savegame)
-{
-  fwrite(cur_sensor->sensor_name, 15, 1, fp);
-  fputc(cur_sensor->sensor_char, fp);
-  fwrite(cur_sensor->robot_to_mesg, 15, 1, fp);
-  fputc(cur_sensor->used, fp);
-}
-
 #ifdef CONFIG_DEBYTECODE
 static
 #endif
@@ -771,22 +928,22 @@ void clear_label_cache(struct label **label_list, int num_labels)
 
 void clear_robot_contents(struct robot *cur_robot)
 {
-  if(cur_robot->stack)
-  {
-    free(cur_robot->stack);
-    cur_robot->stack = NULL;
-  }
+  free(cur_robot->stack);
+  cur_robot->stack = NULL;
 
-#ifdef CONFIG_DEBYTECODE
+#ifdef CONFIG_EDITOR
+
+  free(cur_robot->command_map);
+  cur_robot->command_map = NULL;
+  cur_robot->command_map_length = 0;
+
+#endif
+
   // If it was created by the game or loaded via a save file
   // then it won't have source code.
-  if(cur_robot->program_source)
-  {
-    free(cur_robot->program_source);
-    cur_robot->program_source = NULL;
-    cur_robot->program_source_length = 0;
-  }
-#endif
+  free(cur_robot->program_source);
+  cur_robot->program_source = NULL;
+  cur_robot->program_source_length = 0;
 
   // It could be in the editor, or possibly it was never executed.
   if(cur_robot->program_bytecode)
@@ -885,6 +1042,39 @@ void reallocate_scroll(struct scroll *scroll, size_t size)
 {
   scroll->mesg = crealloc(scroll->mesg, size);
   scroll->mesg_size = size;
+}
+
+int get_robot_id(struct board *src_board, const char *name)
+{
+  int first, last;
+
+  if(find_robot(src_board, name, &first, &last))
+  {
+    struct robot *cur_robot = src_board->robot_list_name_sorted[first];
+    // This is a cheap trick for now since robots don't have
+    // a back-reference for ID's
+    int offset = cur_robot->xpos +
+     (cur_robot->ypos * src_board->board_width);
+    enum thing d_id = (enum thing)src_board->level_id[offset];
+
+    if(is_robot(d_id))
+    {
+      return src_board->level_param[offset];
+    }
+    else
+    {
+      int i;
+      for(i = 1; i <= src_board->num_robots; i++)
+      {
+        if(!src_board->robot_list[i])
+          continue;
+        if(!strcasecmp(name, (src_board->robot_list[i])->robot_name))
+          return i;
+      }
+    }
+  }
+
+  return -1;
 }
 
 static struct label *find_label(struct robot *cur_robot, const char *name)
@@ -1123,7 +1313,7 @@ int send_robot_id_def(struct world *mzx_world, int robot_id, const char *mesg,
   int result = send_robot_id(mzx_world, robot_id, mesg, ignore_lock), subresult;
 
   //now, attempt to send the subroutine version of it
-  if(mzx_world->version >= 0x0254)
+  if(mzx_world->version >= V284)
   {
     strcpy(submesg, "#");
     strncat(submesg, mesg, ROBOT_MAX_TR - 2);
@@ -1137,14 +1327,14 @@ int send_robot_id_def(struct world *mzx_world, int robot_id, const char *mesg,
 void send_robot_all_def(struct world *mzx_world, const char *mesg)
 {
   char submesg[ROBOT_MAX_TR];
-  send_robot_all(mzx_world, mesg);
+  send_robot_all(mzx_world, mesg, 0);
 
   //now, attempt to send the subroutine version of it
-  if(mzx_world->version >= 0x0254)
+  if(mzx_world->version >= V284)
   {
     strcpy(submesg, "#");
     strncat(submesg, mesg, ROBOT_MAX_TR - 2);
-    send_robot_all(mzx_world, submesg);
+    send_robot_all(mzx_world, submesg, 0);
   }
 }
 
@@ -1202,11 +1392,11 @@ void send_robot_def(struct world *mzx_world, int robot_id, int mesg_id)
       break;
 
     case LABEL_JUSTLOADED: //no subroutine version
-      send_robot_all(mzx_world, "JUSTLOADED");
+      send_robot_all(mzx_world, "JUSTLOADED", 0);
       break;
 
     case LABEL_JUSTENTERED: //no subroutine version
-      send_robot_all(mzx_world, "JUSTENTERED");
+      send_robot_all(mzx_world, "JUSTENTERED", 0);
       break;
 
     case LABEL_GOOPTOUCHED:
@@ -1472,10 +1662,60 @@ static void send_sensors(struct world *mzx_world, char *name, const char *mesg)
   }
 }
 
-static void set_robot_position(struct robot *cur_robot, int position)
+static void robot_stack_push(struct robot *cur_robot, int position,
+ int position_in_line)
+{
+  int stack_pointer = cur_robot->stack_pointer;
+  int stack_size = cur_robot->stack_size;
+  int *stack = cur_robot->stack;
+
+  if((stack_pointer + 1) >= stack_size)
+  {
+    // Initialize or double the stack. Don't let it get too large though!
+    if(stack_size == 0)
+      stack_size = 2;
+    else
+      stack_size *= 2;
+
+    if(stack_size > ROBOT_MAX_STACK)
+      return;
+
+    cur_robot->stack = crealloc(stack, stack_size * sizeof(int));
+    stack = cur_robot->stack;
+    cur_robot->stack_size = stack_size;
+  }
+
+  stack[stack_pointer++] = position;
+  stack[stack_pointer++] = position_in_line;
+  cur_robot->stack_pointer = stack_pointer;
+}
+
+static int robot_stack_pop(struct robot *cur_robot, int *position_in_line)
+{
+  int stack_pointer = cur_robot->stack_pointer;
+  int *stack = cur_robot->stack;
+
+  if(stack_pointer)
+  {
+    stack_pointer--;
+    *position_in_line = stack[stack_pointer];
+
+    stack_pointer--;
+    cur_robot->stack_pointer = stack_pointer;
+    return stack[stack_pointer];
+  }
+  else
+  {
+    *position_in_line = 0;
+    return -1;
+  }
+}
+
+static void set_robot_position(struct robot *cur_robot, int position,
+ int position_in_line)
 {
   cur_robot->cur_prog_line = position;
-  cur_robot->pos_within_line = 0;
+  cur_robot->pos_within_line = position_in_line;
   cur_robot->cycle_count = cur_robot->robot_cycle - 1;
 
   // Popping a subroutine's retval from the stack may legitimately
@@ -1491,14 +1731,14 @@ static void set_robot_position(struct robot *cur_robot, int position)
     cur_robot->status = 2;
 }
 
-static int send_robot_direct(struct robot *cur_robot, const char *mesg,
- int ignore_lock, int send_self)
+static int send_robot_direct(struct world *mzx_world, struct robot *cur_robot,
+ const char *mesg, int ignore_lock, int send_self)
 {
   char *robot_program;
   int new_position;
 
 #ifdef CONFIG_DEBYTECODE
-  prepare_robot_bytecode(cur_robot);
+  prepare_robot_bytecode(mzx_world, cur_robot);
 #endif
   robot_program = cur_robot->program_bytecode;
 
@@ -1516,16 +1756,14 @@ static int send_robot_direct(struct robot *cur_robot, const char *mesg,
     {
       if(cur_robot->stack_pointer)
       {
-        int return_pos = robot_stack_pop(cur_robot);
-        set_robot_position(cur_robot, return_pos);
+        int return_pos_in_line;
+        int return_pos = robot_stack_pop(cur_robot, &return_pos_in_line);
+        set_robot_position(cur_robot, return_pos, return_pos_in_line);
       }
       else
-
-      if(send_self)
       {
-        // Contextually invalid return; skip the command
-        cur_robot->cur_prog_line +=
-         1 + robot_program[cur_robot->cur_prog_line] + 1;
+        // Contextually invalid return; treat like an invalid label
+        return 2;
       }
     }
     else
@@ -1535,16 +1773,15 @@ static int send_robot_direct(struct robot *cur_robot, const char *mesg,
     {
       if(cur_robot->stack_pointer)
       {
-        set_robot_position(cur_robot, cur_robot->stack[0]);
+        set_robot_position(cur_robot, cur_robot->stack[0],
+         cur_robot->stack[1]);
+
         cur_robot->stack_pointer = 0;
       }
       else
-
-      if(send_self)
       {
-        // Contextually invalid top; skip the command
-        cur_robot->cur_prog_line +=
-         1 + robot_program[cur_robot->cur_prog_line] + 1;
+        // Contextually invalid top; treat like an invalid label
+        return 2;
       }
     }
     else
@@ -1556,13 +1793,20 @@ static int send_robot_direct(struct robot *cur_robot, const char *mesg,
         // Push the current address onto the stack
         // If a maximum overflow happened, this simply won't work.
         int robot_position = cur_robot->cur_prog_line;
+        int return_position_in_line = 0;
         int return_position;
 
         if(robot_position)
         {
           return_position = robot_position;
 
-          if(send_self)
+          // 2.90+: we want the pos_within_line too.
+          if(cur_robot->world_version >= V290)
+            return_position_in_line = cur_robot->pos_within_line;
+
+          // In DOS versions, ALL subroutine sends returned to the next command.
+          // Self sends in any version should also return to the next command.
+          if(send_self || cur_robot->world_version < VERSION_PORT)
             return_position += robot_program[robot_position] + 2;
         }
         else
@@ -1570,9 +1814,11 @@ static int send_robot_direct(struct robot *cur_robot, const char *mesg,
           return_position = 0;
         }
 
-        robot_stack_push(cur_robot, return_position);
+        robot_stack_push(cur_robot, return_position,
+         return_position_in_line);
+
         // Do the jump
-        set_robot_position(cur_robot, new_position);
+        set_robot_position(cur_robot, new_position, 0);
         return 0;
       }
 
@@ -1585,7 +1831,7 @@ static int send_robot_direct(struct robot *cur_robot, const char *mesg,
 
     if(new_position != -1)
     {
-      set_robot_position(cur_robot, new_position);
+      set_robot_position(cur_robot, new_position, 0);
       return 0;
     }
 
@@ -1603,7 +1849,7 @@ void send_robot(struct world *mzx_world, char *name, const char *mesg,
 
   if(!strcasecmp(name, "all"))
   {
-    send_robot_all(mzx_world, mesg);
+    send_robot_all(mzx_world, mesg, ignore_lock);
   }
   else
   {
@@ -1611,7 +1857,7 @@ void send_robot(struct world *mzx_world, char *name, const char *mesg,
     if(!strcasecmp(name, mzx_world->global_robot.robot_name) &&
      mzx_world->global_robot.used)
     {
-      send_robot_direct(&mzx_world->global_robot, mesg,
+      send_robot_direct(mzx_world, &mzx_world->global_robot, mesg,
        ignore_lock, 0);
     }
 
@@ -1619,7 +1865,7 @@ void send_robot(struct world *mzx_world, char *name, const char *mesg,
     {
       while(first <= last)
       {
-        send_robot_direct(src_board->robot_list_name_sorted[first],
+        send_robot_direct(mzx_world, src_board->robot_list_name_sorted[first],
          mesg, ignore_lock, 0);
         first++;
       }
@@ -1633,28 +1879,30 @@ int send_robot_id(struct world *mzx_world, int id, const char *mesg,
  int ignore_lock)
 {
   struct robot *cur_robot = mzx_world->current_board->robot_list[id];
-  return send_robot_direct(cur_robot, mesg, ignore_lock, 0);
+  return send_robot_direct(mzx_world, cur_robot, mesg, ignore_lock, 0);
 }
 
 int send_robot_self(struct world *mzx_world, struct robot *src_robot,
  const char *mesg, int ignore_lock)
 {
-  return send_robot_direct(src_robot, mesg, ignore_lock, 1);
+  return send_robot_direct(mzx_world, src_robot, mesg, ignore_lock, 1);
 }
 
-void send_robot_all(struct world *mzx_world, const char *mesg)
+void send_robot_all(struct world *mzx_world, const char *mesg, int ignore_lock)
 {
   struct board *src_board = mzx_world->current_board;
   int i;
 
   if(mzx_world->global_robot.used)
   {
-    send_robot_direct(&mzx_world->global_robot, mesg, 0, 0);
+    send_robot_direct(mzx_world, &mzx_world->global_robot,
+     mesg, ignore_lock, 0);
   }
 
   for(i = 0; i < src_board->num_robots_active; i++)
   {
-    send_robot_direct(src_board->robot_list_name_sorted[i], mesg, 0, 0);
+    send_robot_direct(mzx_world, src_board->robot_list_name_sorted[i],
+     mesg, ignore_lock, 0);
   }
 }
 
@@ -1932,13 +2180,9 @@ void prefix_mid_xy_var(struct world *mzx_world, int *mx, int *my,
   *my = tmy;
 }
 
-// Just does the middle prefixes, since those are all that's usually
-// needed...
-void prefix_mid_xy(struct world *mzx_world, int *mx, int *my, int x, int y)
+// Unbounded version.
+void prefix_mid_xy_unbound(struct world *mzx_world, int *mx, int *my, int x, int y)
 {
-  struct board *src_board = mzx_world->current_board;
-  int board_width = src_board->board_width;
-  int board_height = src_board->board_height;
   int tmx = *mx;
   int tmy = *my;
 
@@ -1967,17 +2211,27 @@ void prefix_mid_xy(struct world *mzx_world, int *mx, int *my, int x, int y)
     }
   }
 
-  if(tmx < 0)
-    tmx = 0;
-  if(tmy < 0)
-    tmy = 0;
-  if(tmx >= board_width)
-    tmx = board_width - 1;
-  if(tmy >= board_height)
-    tmy = board_height - 1;
-
   *mx = tmx;
   *my = tmy;
+}
+
+// Just does the middle prefixes, since those are all that's usually
+// needed...
+void prefix_mid_xy(struct world *mzx_world, int *mx, int *my, int x, int y)
+{
+  struct board *src_board = mzx_world->current_board;
+  int board_width = src_board->board_width;
+  int board_height = src_board->board_height;
+  prefix_mid_xy_unbound(mzx_world, mx, my, x, y);
+
+  if(*mx < 0)
+    *mx = 0;
+  if(*my < 0)
+    *my = 0;
+  if(*mx >= board_width)
+    *mx = board_width - 1;
+  if(*my >= board_height)
+    *my = board_height - 1;
 }
 
 // Move an x/y pair in a given direction. Returns non-0 if edge reached.
@@ -2056,7 +2310,7 @@ int parse_param(struct world *mzx_world, char *program, int id)
   }
 
   // Expressions - Exo
-  if((program[1] == '(') && mzx_world->version >= 0x244)
+  if((program[1] == '(') && mzx_world->version >= V268)
   {
     char *e_ptr = program + 2;
     int val, error;
@@ -2393,6 +2647,7 @@ void robot_box_display(struct world *mzx_world, char *program,
 
   // Draw screen
   save_screen();
+  disable_gui_mode0();
   m_show();
 
   dialog_fadein();
@@ -2462,7 +2717,11 @@ void robot_box_display(struct world *mzx_world, char *program,
     update_screen();
 
     update_event_status_delay();
-    key = get_key(keycode_internal);
+    key = get_key(keycode_internal_wrt_numlock);
+
+    // Exit event--mimic Escape
+    if(get_exit_status())
+      key = IKEY_ESCAPE;
 
     mouse_press = get_mouse_press_ext();
 
@@ -2590,6 +2849,7 @@ void robot_box_display(struct world *mzx_world, char *program,
   // Restore screen and exit
   m_hide();
   restore_screen();
+  enable_gui_mode0();
   update_event_status();
 }
 
@@ -2624,7 +2884,7 @@ char *tr_msg_ext(struct world *mzx_world, char *mesg, int id, char *buffer,
   int dest_pos = 0;
   int val, error;
 
-  while((current_char != terminating_char) && (dest_pos < ROBOT_MAX_TR))
+  while((current_char != terminating_char) && (dest_pos < ROBOT_MAX_TR-1))
   {
     switch(current_char)
     {
@@ -2661,7 +2921,7 @@ char *tr_msg_ext(struct world *mzx_world, char *mesg, int id, char *buffer,
         }
         else
 
-        if(!strncasecmp(src_ptr, "input", 5))
+        if(!strncasecmp(src_ptr, "input)", 6))
         {
           dest_pos += sprintf(buffer + dest_pos, "%s",
            src_board->input_string);
@@ -2679,7 +2939,7 @@ char *tr_msg_ext(struct world *mzx_world, char *mesg, int id, char *buffer,
         int expr_length;
         src_ptr++;
         expr_length = parse_string_expression(mzx_world, &src_ptr, id,
-         buffer + dest_pos);
+         buffer + dest_pos, ROBOT_MAX_TR - dest_pos - 1);
         dest_pos += expr_length;
         break;
       }
@@ -2719,7 +2979,7 @@ char *tr_msg_ext(struct world *mzx_world, char *mesg, int id, char *buffer,
   {
     current_char = *src_ptr;
 
-    if((current_char == '(') && (mzx_world->version >= 0x244))
+    if((current_char == '(') && (mzx_world->version >= V268))
     {
       src_ptr++;
       old_ptr = src_ptr;
@@ -2760,7 +3020,7 @@ char *tr_msg_ext(struct world *mzx_world, char *mesg, int id, char *buffer,
 
         while(current_char)
         {
-          if(current_char == '(' && (mzx_world->version >= 0x244))
+          if(current_char == '(' && (mzx_world->version >= V268))
           {
             src_ptr++;
             val = parse_expression(mzx_world, &src_ptr, &error, id);
@@ -2869,7 +3129,7 @@ char *tr_msg_ext(struct world *mzx_world, char *mesg, int id, char *buffer,
       src_ptr++;
       dest_pos++;
     }
-  } while(current_char && (dest_pos < ROBOT_MAX_TR));
+  } while(current_char && (dest_pos < ROBOT_MAX_TR - 1));
 
   buffer[dest_pos] = 0;
   return buffer;
@@ -3039,13 +3299,8 @@ static int find_free_sensor(struct board *src_board)
 // source code. It's only for runtime (use duplicate_robot_direct_source
 // there instead)
 
-#ifdef CONFIG_DEBYTECODE
-static
-#else
-__editor_maybe_static
-#endif
-void duplicate_robot_direct(struct robot *cur_robot,
- struct robot *copy_robot, int x, int y)
+void duplicate_robot_direct(struct world *mzx_world, struct robot *cur_robot,
+ struct robot *copy_robot, int x, int y, int preserve_state)
 {
   char *dest_program_location, *src_program_location;
   struct label *src_label, *dest_label;
@@ -3053,7 +3308,7 @@ void duplicate_robot_direct(struct robot *cur_robot,
   ptrdiff_t program_offset;
 
 #ifdef CONFIG_DEBYTECODE
-  prepare_robot_bytecode(cur_robot);
+  prepare_robot_bytecode(mzx_world, cur_robot);
 #endif
   program_length = cur_robot->program_bytecode_length;
   num_labels = cur_robot->num_labels;
@@ -3089,48 +3344,78 @@ void duplicate_robot_direct(struct robot *cur_robot,
   }
 
 #ifdef CONFIG_DEBYTECODE
+#ifdef CONFIG_EDITOR
   // If we're in the editor, we want to give the new robot a brand new duplicate
   // of our source code.
-  if(editing)
+  if(mzx_world->editing)
   {
+    int cmd_map_size =
+     cur_robot->command_map_length * sizeof(struct command_mapping);
+
     copy_robot->program_source = cmalloc(cur_robot->program_source_length);
     memcpy(copy_robot->program_source, cur_robot->program_source,
      cur_robot->program_source_length);
     copy_robot->program_source_length = cur_robot->program_source_length;
+
+    // And the command map
+    copy_robot->command_map = cmalloc(cmd_map_size);
+    memcpy(copy_robot->command_map, cur_robot->command_map, cmd_map_size);
+    copy_robot->command_map_length = cur_robot->command_map_length;
   }
   // Otherwise we want to at least know it doesn't exist
   else
+#endif /* CONFIG_EDITOR */
+#endif /* CONFIG_DEBYTECODE */
   {
+    // Don't give this robot source; if we're debugging, it will get regenerated
     copy_robot->program_source = NULL;
     copy_robot->program_source_length = 0;
-  }
-#endif
 
-  // Give the robot an empty stack.
-  copy_robot->stack = NULL;
-  copy_robot->stack_size = 0;
-  copy_robot->stack_pointer = 0;
+#ifdef CONFIG_EDITOR
+    // Don't give this robot a command map; if we're debugging, it will get regenerated
+    copy_robot->command_map = NULL;
+    copy_robot->command_map_length = 0;
+#endif
+  }
+
+  if(preserve_state && mzx_world->version < VERSION_PORT)
+  {
+    // In DOS versions, copy and copy block preserved the current robot state
+    // Therefore leave all robot vars alone and copy the stack over
+    size_t stack_capacity = copy_robot->stack_size * sizeof(int);
+    copy_robot->stack = cmalloc(stack_capacity);
+    memcpy(copy_robot->stack, cur_robot->stack, stack_capacity);
+  }
+  else
+  {
+    // Give the robot an empty stack.
+    copy_robot->stack = NULL;
+    copy_robot->stack_size = 0;
+    copy_robot->stack_pointer = 0;
+
+    if(cur_robot->cur_prog_line)
+      copy_robot->cur_prog_line = 1;
+
+    copy_robot->pos_within_line = 0;
+    copy_robot->status = 0;
+  }
   copy_robot->xpos = x;
   copy_robot->ypos = y;
-
-  if(cur_robot->cur_prog_line)
-    copy_robot->cur_prog_line = 1;
-
-  copy_robot->pos_within_line = 0;
-  copy_robot->status = 0;
 }
 
 // Finds a robot ID then duplicates a robot there. Must not be called
 // in the editor (use duplicate_robot_source instead).
 
-int duplicate_robot(struct board *src_board, struct robot *cur_robot,
- int x, int y)
+int duplicate_robot(struct world *mzx_world,
+ struct board *src_board, struct robot *cur_robot,
+ int x, int y, int preserve_state)
 {
   int dest_id = find_free_robot(src_board);
   if(dest_id != -1)
   {
     struct robot *copy_robot = cmalloc(sizeof(struct robot));
-    duplicate_robot_direct(cur_robot, copy_robot, x, y);
+    duplicate_robot_direct(mzx_world, cur_robot, copy_robot, x, y,
+      preserve_state);
     add_robot_name_entry(src_board, copy_robot, copy_robot->robot_name);
     src_board->robot_list[dest_id] = copy_robot;
   }
@@ -3142,8 +3427,8 @@ int duplicate_robot(struct board *src_board, struct robot *cur_robot,
 // so that it can modify the ID table. The dest position is assumed
 // to already contain something, and is thus cleared first.
 // Will not allow replacing the global robot.
-void replace_robot(struct board *src_board, struct robot *src_robot,
- int dest_id)
+void replace_robot(struct world *mzx_world, struct board *src_board,
+ struct robot *src_robot, int dest_id)
 {
   char old_name[64];
   int x = (src_board->robot_list[dest_id])->xpos;
@@ -3153,7 +3438,7 @@ void replace_robot(struct board *src_board, struct robot *src_robot,
   strcpy(old_name, cur_robot->robot_name);
 
   clear_robot_contents(cur_robot);
-  duplicate_robot_direct(src_robot, cur_robot, x, y);
+  duplicate_robot_direct(mzx_world, src_robot, cur_robot, x, y, 0);
   strcpy(cur_robot->robot_name, old_name);
 
   if(dest_id)
@@ -3161,7 +3446,7 @@ void replace_robot(struct board *src_board, struct robot *src_robot,
 }
 
 // Like duplicate_robot_direct, but for scrolls.
-__editor_maybe_static void duplicate_scroll_direct(struct scroll *cur_scroll,
+void duplicate_scroll_direct(struct scroll *cur_scroll,
  struct scroll *copy_scroll)
 {
   size_t mesg_size = cur_scroll->mesg_size;
@@ -3174,7 +3459,7 @@ __editor_maybe_static void duplicate_scroll_direct(struct scroll *cur_scroll,
 }
 
 // Like duplicate_robot_direct, but for sensors.
-__editor_maybe_static void duplicate_sensor_direct(struct sensor *cur_sensor,
+void duplicate_sensor_direct(struct sensor *cur_sensor,
  struct sensor *copy_sensor)
 {
   // Copy all the contents
@@ -3379,27 +3664,37 @@ void optimize_null_objects(struct board *src_board)
 
 #ifdef CONFIG_DEBYTECODE
 
-void prepare_robot_bytecode(struct robot *cur_robot)
+void prepare_robot_bytecode(struct world *mzx_world, struct robot *cur_robot)
 {
   if(cur_robot->program_bytecode == NULL)
   {
-    cur_robot->program_bytecode =
-     assemble_program(cur_robot->program_source,
-     &(cur_robot->program_bytecode_length));
+#ifdef CONFIG_EDITOR
+    if(mzx_world->editing)
+    {
+      // Assemble and map the program. Do not free the source.
+      assemble_program(cur_robot->program_source,
+       &cur_robot->program_bytecode, &cur_robot->program_bytecode_length,
+       &cur_robot->command_map, &cur_robot->command_map_length);
+    }
+    else
+#endif
+    {
+      // Assemble, but do not map the program.
+      assemble_program(cur_robot->program_source,
+       &cur_robot->program_bytecode, &cur_robot->program_bytecode_length,
+       NULL, NULL);
+
+      // Can free source code if we're not in the editor.
+      free(cur_robot->program_source);
+      cur_robot->program_source = NULL;
+      cur_robot->program_source_length = 0;
+    }
 
     // This was moved here from load robot - only build up the labels once the
     // robot's actually used. But eventually this should be combined with
     // assemble_program.
     cur_robot->label_list =
      cache_robot_labels(cur_robot, &cur_robot->num_labels);
-
-    // Can free source code if we're not in the editor.
-    if(!editing)
-    {
-      free(cur_robot->program_source);
-      cur_robot->program_source = NULL;
-      cur_robot->program_source_length = 0;
-    }
   }
 }
 

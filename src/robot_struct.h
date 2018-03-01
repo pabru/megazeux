@@ -25,6 +25,7 @@
 __M_BEGIN_DECLS
 
 #include "data.h"
+#include "legacy_rasm.h"
 
 struct label
 {
@@ -60,10 +61,8 @@ struct sensor
 struct robot
 {
   int world_version;
-#ifdef CONFIG_DEBYTECODE
   int program_source_length;
   char *program_source;
-#endif
   int program_bytecode_length;
   char *program_bytecode;         // Pointer to robot's program
   char robot_name[15];
@@ -76,6 +75,7 @@ struct robot
   char bullet_type;
   char is_locked;
   char can_lavawalk;              // Can always travel on fire
+  char can_goopwalk;
   enum dir walk_dir;
   enum dir last_touch_dir;
   enum dir last_shot_dir;
@@ -107,6 +107,17 @@ struct robot
 
   // Local counters - store in save file
   int local[32];
+
+#ifdef CONFIG_EDITOR
+  // A mapping of bytecode lines to source lines.
+  struct command_mapping *command_map;
+  int command_map_length;
+
+  // Total commands run; commands run in cycle; commands seen by debugger
+  int commands_total;
+  int commands_cycle;
+  int commands_caught;
+#endif
 };
 
 __M_END_DECLS

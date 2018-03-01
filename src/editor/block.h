@@ -1,6 +1,8 @@
 /* MegaZeux
  *
  * Copyright (C) 1996 Greg Janson
+ * Copyright (C) 2004 Gilead Kutnick <exophase@adelphia.net>
+ * Copyright (C) 2017 Alice Rowan <petrifiedrowan@gmail.com>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
@@ -17,8 +19,6 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
-/* Declarations */
-
 #ifndef __EDITOR_BLOCK_H
 #define __EDITOR_BLOCK_H
 
@@ -26,13 +26,39 @@
 
 __M_BEGIN_DECLS
 
-#include "../world_struct.h"
+#include "../board_struct.h"
 
-int block_cmd(struct world *mzx_world);
-int rtoo_obj_type(struct world *mzx_world);
-int choose_char_set(struct world *mzx_world);
-int export_type(struct world *mzx_world);
-int import_type(struct world *mzx_world);
+void clear_layer_block(
+ char *dest_char, char *dest_color, int dest_width, int dest_offset,
+ int block_width, int block_height);
+void clear_board_block(struct board *dest_board, int dest_offset,
+ int block_width, int block_height);
+
+void flip_layer_block(
+ char *dest_char, char *dest_color, int dest_width, int dest_offset,
+ int block_width, int block_height);
+void flip_board_block(struct board *dest_board, int dest_offset,
+ int block_width, int block_height);
+
+void mirror_layer_block(
+ char *dest_char, char *dest_color, int dest_width, int dest_offset,
+ int block_width, int block_height);
+void mirror_board_block(struct board *dest_board, int dest_offset,
+ int block_width, int block_height);
+
+void paint_layer_block(char *dest_color, int dest_width, int dest_offset,
+ int block_width, int block_height, int paint_color);
+
+void copy_layer_buffer_to_buffer(
+ char *src_char, char *src_color, int src_width, int src_offset,
+ char *dest_char, char *dest_color, int dest_width, int dest_offset,
+ int block_width, int block_height);
+
+void move_layer_block(
+ char *src_char, char *src_color, int src_width, int src_offset,
+ char *dest_char, char *dest_color, int dest_width, int dest_offset,
+ int block_width, int block_height,
+ int clear_width, int clear_height);
 
 __M_END_DECLS
 

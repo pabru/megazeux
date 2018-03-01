@@ -40,6 +40,8 @@ __M_BEGIN_DECLS
 
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof(x[0]))
 
+#define SGN(x) ((x > 0) - (x < 0))
+
 #ifndef DIR_SEPARATOR
 #ifdef __WIN32__
 #define DIR_SEPARATOR "\\"
@@ -65,12 +67,12 @@ enum resource_id
   MZX_HELP_FIL,
 #endif
 #ifdef CONFIG_RENDER_GL_PROGRAM
+  SHADERS_SCALER_DIRECTORY,
   SHADERS_SCALER_VERT,
   SHADERS_SCALER_FRAG,
   SHADERS_TILEMAP_VERT,
   SHADERS_TILEMAP_FRAG,
-  SHADERS_TILEMAP_SMZX12_FRAG,
-  SHADERS_TILEMAP_SMZX3_FRAG,
+  SHADERS_TILEMAP_SMZX_FRAG,
   SHADERS_MOUSE_VERT,
   SHADERS_MOUSE_FRAG,
   SHADERS_CURSOR_VERT,
@@ -83,9 +85,20 @@ CORE_LIBSPEC int mzx_res_init(const char *argv0, bool editor);
 CORE_LIBSPEC void mzx_res_free(void);
 CORE_LIBSPEC char *mzx_res_get_by_id(enum resource_id id);
 
+// Code to load multi-byte ints from little endian file
+int fgetw(FILE *fp);
+int fgetd(FILE *fp);
+void fputw(int src, FILE *fp);
+void fputd(int src, FILE *fp);
+
 CORE_LIBSPEC long ftell_and_rewind(FILE *f);
+
+CORE_LIBSPEC void rng_seed_init(void);
+unsigned long long rng_get_seed(void);
+void rng_set_seed(unsigned long long seed);
 unsigned int Random(unsigned long long range);
 
+CORE_LIBSPEC void add_ext(char *src, const char *ext);
 CORE_LIBSPEC ssize_t get_path(const char *file_name, char *dest, unsigned int buf_len);
 #ifdef CONFIG_UTILS
 ssize_t __get_path(const char *file_name, char *dest, unsigned int buf_len);
@@ -98,6 +111,10 @@ CORE_LIBSPEC void split_path_filename(const char *source,
 CORE_LIBSPEC int create_path_if_not_exists(const char *filename);
 
 CORE_LIBSPEC int change_dir_name(char *path_name, const char *dest);
+
+CORE_LIBSPEC void join_path_names(char* target, int max_len, const char* path1, const char* path2);
+
+CORE_LIBSPEC void clean_path_slashes(const char *source, char *dest, size_t buf_size);
 
 typedef void (*fn_ptr)(void);
 
@@ -113,7 +130,7 @@ struct dso_syms_map
 #define PATH_BUF_LEN MAX_PATH
 
 struct mzx_dir {
-#ifdef CONFIG_PSP
+#if defined(CONFIG_PSP) || defined(CONFIG_3DS)
   char path[PATH_BUF_LEN];
 #endif
   DIR *d;
@@ -132,6 +149,16 @@ CORE_LIBSPEC void boyer_moore_index(void *B, size_t b_len,
 CORE_LIBSPEC void *boyer_moore_search(void *A, size_t a_len, void *B, size_t b_len,
  int *index, bool ignore_case);
 
+// Code to load/save multi-byte ints to/from little endian memory
+int mem_getc(const unsigned char **ptr);
+int mem_getd(const unsigned char **ptr);
+int mem_getw(const unsigned char **ptr);
+void mem_putc(int src, unsigned char **ptr);
+void mem_putd(int src, unsigned char **ptr);
+void mem_putw(int src, unsigned char **ptr);
+ 
+CORE_LIBSPEC int memsafegets(char *dest, int size, char **src, char *end);
+
 #if defined(__WIN32__) && defined(__STRICT_ANSI__)
 CORE_LIBSPEC int strcasecmp(const char *s1, const char *s2);
 CORE_LIBSPEC int strncasecmp(const char *s1, const char *s2, size_t n);
@@ -143,7 +170,8 @@ CORE_LIBSPEC char *strsep(char **stringp, const char *delim);
 
 #ifndef __WIN32__
 #if defined(CONFIG_PSP) || defined(CONFIG_GP2X) \
- || defined(CONFIG_NDS) || defined(CONFIG_WII)
+ || defined(CONFIG_NDS) || defined(CONFIG_WII) \
+ || defined(CONFIG_3DS)
 #include <string.h>
 #else
 #include <strings.h>

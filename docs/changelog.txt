@@ -1,18 +1,572 @@
-GIT
+TBA - MZX 2.91c
 
-+ FIXME: Updater needs help file section and context
-+ FIXME: Robot debugger needs to be linked to context
-+ FIXME: Counter debugger needs to be linked to context
+This release contains an assortment of bugfixes ranging from
+player clone fixes to obscure compatibility patches. A handful
+of updater issues have been fixed (or at least addressed).
+
+MegaZeux can now automatically check for updates on startup on
+Windows platforms. This behavior can be configured, and by
+default will simply leave a message in the window caption.
+
+USERS
+
++ MegaZeux can now automatically run the updater on startup
+  on applicable platforms. This can be configured with the
+  'update_auto_check' config file option.
++ Fixed a bug where several .MOD variants stopped working with
+  libxmp enabled.
++ Sound effects in subdirectories can now be used in the SFX
+  editor.
++ Fixed a bug where checkres would fail on legacy worlds with
+  very long custom SFX.
++ Checkres no longer ignores the SFX tables of 2.90+ worlds.
++ Fixed a bug where interpolated expressions containing ternary
+  operators could terminate counter names early.
++ Fixed faulty IF ANY compatibility behavior.
++ Fixed a bug where FWRITE functions could change the case of
+  user-defined filenames when creating new files on non-Windows
+  platforms.
++ SMZX mode 1 palettes are now exported correctly as 16 colors
+  instead of as 256 colors.
++ Fixed subtly inconsistent timing in certain built-ins.
++ Fixed bug where wind and transporters could clone the player.
++ MegaZeux now restarts correctly in paths containing spaces
+  when the updater is run.
++ Subroutines in pre-port MZX worlds now always return to the
+  command after the subroutine was sent.
++ Typed color components now wrap from the maximum value to zero
+  like dialog number inputs, and pressing minus will now negate
+  the input number.
++ Copying chars in the char editor between regular and SMZX
+  screen modes now works properly.
++ Fixed a crash that could occur when placing things on a vlayer
+  larger than the current board.
++ Sharks and SpittingTigers with firing rates greater than 4 now
+  retain their firing rate when edited.
++ Fixed a bug where world decryption could crash. (Revvy)
++ If the glsl renderer is selected by default, the detection of
+  a software opengl driver will result in falling back to
+  software. (Lancer-X)
++ Fixed a bug in the GLSL renderer where an additional window is
+  created if the OpenGL version is low enough to cause a
+  fallback to software. (Lancer-X)
+
+DEVELOPERS
+
++ Added .MZX-based unit testing system. Run with "make test".
+  See testworlds/README.md for more information.
++ The default renderer is now auto_glsl, which turns into glsl
+  if not using a blacklisted opengl driver. (Lancer-X)
+
+January 6, 2018 - MZX 2.91b
+
+Here's a fairly significant update for MegaZeux 2.91, fixing
+several major Robotic, audio, and editor related bugs, as well
+as issues that mostly affected Linux platforms. Also of note is
+the updated MSVC and Xcode support by Spectere.
+
+USERS
+
++ Added the config file option "editor_thing_menu_places". When
+  set to 0, selecting an object from the thing menus (F3-F10)
+  will place the object in the buffer but not on the board.
+  Defaults to 1.
++ Fixed a bug where MZMs could sometimes fail to load in the
+  editor.
++ MZMs loaded in the editor now behave correctly when undone.
++ Fixed bug where GOOP_WALK wouldn't always be 0 when loading
+  old worlds.
++ Values of GOOP_WALK greater than 1 no longer cause issues.
++ Board time limits greater than 255 are no longer truncated
+  when saving worlds/saves.
++ Fixed bug where "robot not found" errors could result from
+  using backspace on robots in the editor.
++ Fixed backwards string inequality evaluation.
++ String inequality compares are now endian-safe.
++ Fixed a bug where certain mods (e.g. FR_TOWER.MOD, Neve.s3m)
+  could repeat to the wrong order after reaching the end.
++ Fixed a bug where certain .it channels could partially ignore
+  the volume command.
++ Setting mod_position in libxmp now works for positions in the
+  middle of orders (NoSuck).
+
+DEVELOPERS
+
++ Updated MSVC for Visual Studio 2017. (Spectere)
++ Added xcode support. (Spectere)
++ "make clean" now deletes ccv. (pgimeno)
++ Fixed creeping CRLF usage. (Lachesis, pgimeno, Spectere)
++ Fixed a bug where the MSYS2 build scripts could inadvertently
+  include non-portable SDL2 binaries in Windows builds.
+
+
+November 22, 2017 - MZX 2.91
+
+This release introduces mostly new editor features, but also a
+a few Robotic features to note. It also fixes over 30 bugs.
+
+MegaZeux now features a palette editor for SMZX modes 2 and 3,
+and worlds can be saved and loaded in SMZX mode. The char editor
+has been changed to allow preview palettes (mostly to aid with
+SMZX editing), and can now access the extended character sets.
+The new vlayer editor allows the vlayer to be edited directly.
+
+On the Robotic side of things, LOAD_COUNTERS actually works now,
+SMZX mode 3 indices can be loaded from a file, the message line
+can be configured to use normal MZX mode in SMZX modes, and new
+string features such as simple wildcard matching and negative
+offsets have been added. String support has been improved to
+disallow invalid or nonsense string splices that previously had
+undefined behavior.
+
+Additionally, asie's new Nintendo 3DS port has been merged into
+MZX, and optional SDL support has been added for the Wii.
+
+FEATURES
+
++ Added SMZX_INDICES special counter to load SMZX indices. This
+  counter works with either a filename or a string, e.g.
+  set "file.palidx" "SMZX_INDICES", and will do nothing outside
+  of mode 3.
++ Added MOD_LENGTH counter. The value of this counter is length
+  of the current playing music in rows for modules, or in
+  samples for PCM audio.
++ Added MAX_SAMPLES counter. When set, MegaZeux will limit the
+  maximum number of samples that will play simultaneously. Set
+  to -1 to disable the sample limit.
++ Added 'max_simultaneous_samples' config file option. This
+  behaves the same as the MAX_SAMPLES counter, but applies
+  globally.
++ Added SMZX_MESSAGE counter. When set to 0 with SMZX active,
+  messages will display in normal MZX mode instead of SMZX
+  using the first 16 colors of the SMZX palette.
++ Added 'random_seed#' counters to read and write the random
+  seed, 32 bits at a time (random_seed0 controls the low 32 bits
+  and random_seed1 controls the high 32 bits. (Lancer-X)
++ Added a case-sensitive string equality operator:
+  IF "$string" === "ABC" then "label".
++ Added wildcard-matching string equality operators:
+  IF "$string" ?= "a?%" then "label"
+  IF "$string" ?== "a?%" then "label" (case-sensitive).
+  The character '?' will match exactly one of any character in
+  $string, and '%' will match any number of any character in
+  $string (including no characters).
++ Added negative indexing for strings, e.g. SET "$string.-X" 32.
+  This manipulates the string at the Xth character starting from
+  the end of the string (with -1 for the final character).
++ Added negative offsets for strings, e.g. SET "$string+-X" "a".
++ Added multiple character indexing for strings. When a length
+  is provided with a string index, e.g. SET "$string.X#Y" 12345,
+  the characters at positions X, X+1, ..., X+Y-1 will be treated
+  as a single 8*Y bit number. This works for values of Y between
+  1 and 4, with 4 characters providing the same functionality as
+  a counter.
++ The palette editor and character editor are now accessible
+  while testing. Press Alt+E or Alt+C respectively to access
+  them from the counter debugger.
++ Extended the palette editor to SMZX modes 2 and 3. The updated
+  palette editor allows the editing of all 256 SMZX mode 2/3
+  colors and editing color indices for SMZX 3.
++ Component numbers can now be typed in the palette editor by
+  clicking the component name or its number, e.g. clicking "Red"
+  allows you to type a red value.
++ SMZX indices can now be imported/exported while editing in
+  mode 3 using import/export palette.
++ Added a new vlayer editor. In the world editor, press Alt+V to
+  switch to the vlayer editor. The vlayer is something like an
+  invisible global overlay that can be used to store and
+  retrieve graphical data through Robotic. See the editor help
+  and the Robotic reference manual for more details.
++ Added color selection to the character editor. Press C to
+  choose a color to preview and edit chars with, and press Alt+C
+  to revert back to the default grey.
++ Added extended charset support to the char editor. Extended
+  charsets can be selected during char selection. Note that in
+  gameplay these chars can be accessed only by unbound sprites.
++ Selected blocks of chars with a height greater than one
+  (before selecting a subdivision) are now properly supported.
+  Using -/+ with these selections will move in a tiled manner,
+  with no overlap between chars in "tiles". Charsets can also be
+  exported/imported using this tiling behavior.
++ The -/+ keys now behave the same in the char selection screen
+  as they do in the char editor.
++ The character editor help now covers several shortcuts that
+  were previously missing (Alt+B, Shift+Arrows, etc...).
++ The undo/redo shortcuts in the character editor are now Ctrl+Z
+  for undo and Ctrl+Y for redo.
++ Added undo/redo functionality to the world editor. Use Ctrl+Z
+  to undo changes to the board/overlay/vlayer and Ctrl+Y to
+  redo.
++ The default editor undo history stack size has been extended
+  to 100 levels.
++ The editor will now prompt the user to create a new starting
+  board when opened. If a new board is created, the global first
+  board will be set to the new board and the title board will be
+  renamed.
++ Saved positions now have confirmation dialogs. Saved positions
+  are saved to/loaded from the editor.cnf file for each world.
++ Pressing Enter/Return on the overlay (and vlayer) now acts the
+  same as on the board, changing both the buffer and the current
+  layer being edited.
++ Pressing P on the overlay (and vlayer) now acts the same as on
+  the board, changing the character in the buffer but NOT on the
+  current layer. This is equivalent to the original overlay
+  behavior for Enter.
++ Block tiling movement (Ctrl+Arrows) now works with most block
+  actions, and does not require an initial block placement to
+  activate.
++ Restoring its DOS functionality, Alt+D now toggles the default
+  colors of built-in types in the editor. When disabled,
+  built-ins placed from thing menus will use the buffer color
+  instead of their default colors, and a red dot will appear on
+  the right side of the status bar.
++ Color selection now supports typing in the hex value of a
+  color/subpalette to select the given color/subpalette. For
+  example, typing "4c" will select background color 4 and
+  foreground color 12.
++ Readded the downver utility.
+- Removed the undocumented Shift+F7 shortcut in the editor. This
+  shortcut was redundant with F11.
+
+FIXES
+
++ Fixed a bug that would cause Linux binaries to fail to find
+  most resources.
++ Fixed a bug where loading a save from the titlescreen, exiting
+  gameplay to a world that doesn't exist, and then loading a
+  second save would corrupt the counter and string hash tables.
++ Fixed crash that would occur when loading a saved position on
+  the same board referring to out-of-bounds coordinates.
++ Fixed a freeze that could occur opening the counter debugger
+  to an empty list or searching for a counter in an empty list.
++ LOAD_COUNTERS now works as intended.
++ Fixed a bug where key repeat would be prematurely terminated
+  when releasing a key while holding another key.
++ Attempting to open the robot validator with no errors will no
+  longer crash MegaZeux.
++ Backspace now mirrors delete in overlay mode instead of
+  affecting the board.
++ Moving an overlay block partially out of bounds in the editor
+  will now correctly clear the block's original position.
++ The color selector will now correctly display SMZX palettes in
+  SMZX mode instead of the default char 254.
++ Fixed bug where the mouse cursor would vanish after using the
+  robot debugger configuration dialog in the editor.
++ Fixed a bug where the counter debugger could sometimes display
+  behind the robot debugger after exiting the counter debugger.
++ Undo in the char editor now works correctly with the mouse.
++ The char editor no longer forces the screen to SMZX mode 1
+  when editing in SMZX modes 2 or 3.
++ Fixed screen corruption bug when resizing the char editor in
+  SMZX modes.
++ Fixed a bug where multichar editing wouldn't correctly wrap to
+  the start of the charset.
++ The editing area outside of the current board is now correctly
+  drawn when SMZX is enabled.
++ The viewport is now correctly drawn when SMZX is enabled and
+  the UI or unbound sprites are active.
++ The editor bar no longer appears while SMZX is enabled in view
+  mode.
++ Messages are now drawn correctly in SMZX mode.
++ Fixed bug where centering the viewport could change the width
+  and height of the viewport.
++ Unbound sprites are now clipped correctly against the viewport
+  when the viewport origin is not 0,0. (Lancer-X)
++ The VLAYER_SIZE counter now clears new vlayer area added when
+  it is increased. This applies only to 2.91+ worlds.
++ The VLAYER_WIDTH and VLAYER_HEIGHT counters now preserve data
+  on the vlayer when set. This applies only to 2.91+ worlds.
++ Fixed several bugs with string length and offset parsing that
+  would allow invalid string accesses to work in certain cases.
++ COPY BLOCK $string now works correctly with string splices.
++ Fixed a bug where saving and loading 2.90X files wouldn't work
+  on the Nintendo DS.
++ Fixed a bug where mouse clicks would carry through from the UI
+  into games.
++ Invalid gl_scaling_shader values should no longer appear as
+  the current loaded scaler.
++ MegaZeux now falls back to the default scaling shader when a
+  selected scaling shader fails to compile.
++ Blank sprite chars are now drawn when ccheck is 3. (Lancer-X)
++ The sprite color is used with ccheck 3 collisions. (Lancer-X)
++ When spr_yorder is enabled, sprites with the same (sprN_y +
+  sprN_cy) value are now consistently ordered by their sprite
+  numbers.
++ The collision rectangles of ccheck 3 sprites now constrained
+  to the sprite dimensions (Lancer-X).
++ MZX no longer crashes when a line of length 512 characters or
+  longer is pasted into the robot editor.
++ Fixed a crash bug when trying to swap a sprite with an
+  invalid sprite index.
+
+DEVELOPERS
+
++ Added Nintendo 3DS port. (asiekierka)
++ Added "make uninstall" option to the Linux makefile.
++ Added devkitPro portlibs paths to the NDS and Wii Makefiles.
+- Removed the depackers and non-MegaZeux formats from libxmp.
+
+
+September 4, 2017 - MZX 2.90d
+
+Here's another bugfix release. This is mostly assorted small
+fixes, but there are also a couple of major fixes here: first,
+the ternary operator now works correctly when nested both with
+and without expressions, and second, sprN_setview does not break
+in conjunction with certain unbound sprites. Additionally, SAMs
+will not be converted to WAV files anymore (and are now natively
+supported) and the robot debugger config is accessible from the
+editor.
+
+FEATURES
+
++ The current MegaZeux version is now visible from the enter
+  menu on the title screen. This is to assist identifying the
+  version on platforms that don't respect window title changes
+  or have no window border.
++ Updated checkres.bat and checkres documentation.
++ The robot debugger configuration screen is now accessible from
+  the editor via Alt+F11.
++ Removed SAM to WAV converter. MegaZeux now has native SAM
+  support. (asiekierka)
++ Added crt-wave.frag, updated crt.frag. (astral)
+
+FIXES
+
++ Fixed a bug where MegaZeux would crash when editing a robot
+  with an invalid IF command operator.
++ Fixed a bug where the ternary operator would fail to find the
+  correct colon when the middle term contained a second ternary
+  operator in a nested expression.
++ Nested ternary operators should now behave as expected.
++ Fixed a bug where the built-in cursor would disappear after
+  exiting testing with EXIT_GAME.
++ Fixed a bug where the listening mod would not restart after
+  exiting testing.
++ Fixed a bug where the robot debugger would not wrap long lines
+  of Robotic code correctly.
++ Attempting to save a world in a write-protected location
+  correctly displays an error message again.
++ Fixed a bug where key repeat would not work when scrolling
+  through the counter debugger tree list.
++ checkres will no longer report empty filenames as dependencies
+  e.g. SET "" TO "FWRITE_OPEN".
++ The -q flag in checkres will now correctly output filenames
+  instead of nothing.
++ Fixed a bug where sprN_setview would scroll the viewport to
+  the wrong side of the screen if the sprite is unbound and is
+  close to the top or left edge of the board. (Lancer-X)
+
+DEVELOPERS
+
++ Fixed PSP and NDS ports. (asiekierka)
+
+
+July 25, 2017 - MZX 2.90c
+
+This is a small fix release mostly cleaning up issues from the
+previous release.
+
+Notable fixes include a crash on certain instances of string
+interpolation into counters/labels/text. Playing mods as sound
+effects works again, and the audio_sample_rate config file
+option now works correctly.
+
+This release also includes support for loading save files from
+MegaZeux 2.84X and experimental editor behavior for handling
+board charsets and palettes.
+
+FEATURES
+
++ Save files from 2.84X worlds can now be loaded.
++ The editor can be configured to automatically load board
+  charsets and palettes now. Use the 'editor_load_board_assets'
+  config file option to enable this behavior. This behavior is
+  disabled by default. Note that this will OVERWRITE THE CURRENT
+  WORLD CHARSET AND PALETTE and your changes will NOT be saved
+  automatically.
++ GLSL is now the default renderer. (Lancer-X)
+
+FIXES
+
++ Fixed bug where --disable-modular builds would fail to link.
++ Fixed bug with libxmp integration where mods could not be
+  played as sound effects.
++ Fixed bug with libxmp integration where MZX would assume
+  audio_sample_rate was 44100, causing mods to play at incorrect
+  pitches with other rates.
++ Fixed bug where editor config file options would be ignored at
+  the command line.
++ Fixed bug where string interpolation into a label/counter name
+  could cause MZX to crash with very long strings.
+
+
+July 16, 2017 - MZX 2.90b
+
+It's been two weeks, so here's a bugfix release for MZX 2.90.
+There isn't a whole lot that's new to talk about.
+
+Firstly, the palette editor has gone through an overhaul. This
+is mostly internal preparation for an eventual SMZX palette
+editor, but the new features include the partial restoration of
+mouse input (which was removed in 2.80X), the addition of color
+sliders, the ability to hide the palette editor help, and two
+new colorspaces (HSL and CIELAB) to aid in the selection of
+palette colors.
+
+Next, the robot debugger introduced in 2.90 has new features.
+You can now set "watchpoints" to watch the status of particular
+variables, and you can send labels/goto from the robot debugger.
+The robot debugger config screen has been visually improved, and
+line number breakpoints can be defined. Another notable feature
+is that KEY_PRESSED and KEY_CODE values are now displayed in the
+debug window during gameplay.
+
+libxmp is now the default sound engine for modules, fixing a
+longstanding bug where certain S3Ms would have muted channels.
+GDM modules are now supported by MZX again. If you notice any
+inaccuracies with mod files, please report them to the tracker.
+
+Fixed bugs include a major overhaul of the glsl shaders for
+compatibility with almost any system, various sprite, text box,
+and input bugs, a crash fix when MZMs were saved from out of
+bounds board locations, and a bug where opening worlds or
+testing from the editor could cause MegaZeux to exit.
+
+FEATURES
+
++ The "shaders/extra" folder is now "shaders/scalers". The
+  default vertex shader is still located in the shaders folder.
++ The default scaling shader can now be set in the config file
+  using the gl_scaling_shader option. If not defined, MegaZeux
+  will load assets/shaders/scalers/semisoft.frag.
++ The robot debugger now supports monitoring the values of
+  counters and strings. Use the config menu/breakpoint editor to
+  add watchpoints; when the debugger detects a change in a
+  watchpoint counter/string AFTER a command has been executed,
+  the robot debugger will open.
++ The robot debugger can now send robots labels. Use 'G' or
+  select 'Goto' in the robot debugger to use this feature. The
+  name and label inputs support expression parsing and string/
+  counter interpolation.
++ The robot debugger can now use line numbers in breakpoints.
++ The palette editor help can now be hidden with Alt+H. The
+  default behavior for this can be set in the config file. The
+  palette editor help is visible by default.
++ The palette editor's mouse functionality has been improved.
+  Behavior when clicking the palette has been restored, and
+  component sliders have been added.
++ The palette editor now supports alternate color spaces.
++ The debug window now displays the last key_code (green) and
+  key_pressed (magenta) values detected during gameplay. These
+  values are located in the bottom right corner of the window.
++ The default fullscreen resolution for scalable renderers is
+  now 1280,720. The default fullscreen resolution for 'software'
+  is still 640,480. The default aspect ratio is now 'modern'.
++ The checkres utility has been updated to support 2.90X worlds,
+  worlds in subdirectories of zip archives, multiple input files
+  to test, and the ability to specify secondary directories and
+  zips to search (e.g. for games with separate music zips).
+
+BUGFIXES
+
++ Fixed a bug where certain "keyN" labels, such as "key$", would
+  not work correctly.
++ Integer comparisons between numbers greater than 2^31-1 apart
+  now work correctly. (Lancer-X)
++ The palette editor now displays the SMZX mode 1 palette
+  correctly.
++ Sprite collisions now correctly ignore the sprite's visual
+  width and height.
++ Blank lines are no longer skipped when copy-pasting text into
+  the robot editor. (Lancer-X)
++ Fixed a bug where key presses in dialogs could be detected in
+  games, and keypresses could still carry between other dialogs.
++ [ message boxes now use the same screen mode as everything
+  else. Same with scrolls. (Lancer-X)
++ spr#_setview now works with unbound sprites. It's pretty nasty
+  as the viewport can't scroll with pixel precision, but the new
+  behavior should still be better than the old. (Lancer-X)
++ Fixed a bug affecting certain Intel HD Graphics cards and the
+  GLSL renderer that appears to have been around since that
+  renderer was first introduced. (Lancer-X)
++ Fixed a bug where the numeric numpad keys were inappropriately
+  translated to regular keys based on numlock when they were
+  read from KEY_PRESSED. This behavior is now locked to worlds
+  from 2.82X through 2.84X.
++ Fixed a bug where warping the mouse on one axis would snap the
+  mouse to the nearest pixel on the other axis, causing problems
+  for upscaled windows.
++ Fixed a bug where mouse control would not respect video_ratio
+  settings aside from "stretch".
+* Fixed a bug where MZX would attempt to load certain invalid
+  worlds that should have been caught by validation.
++ Copy block to MZM no longer crashes when the MZM is partially
+  overlapping the board edge. (Lancer-X)
++ Fixed bug where MegaZeux would sometimes exit immediately on
+  loading a game or would immediately exit testing.
+
+DEVELOPERS
+
++ libxmp is now the default module sound engine. Use "make xmp"
+  to make and install libxmp if it is not available on your
+  platform.
++ Mac OS X portability improved. (Spectere and Why-Fi)
+
+
+June 29, 2017 - MZX 2.90
+
+Hey, it's been a while! Didn't mean to keep everyone waiting.
+To make up for it as much as possible, we've prepared an extra
+special release of MegaZeux here for you. Yeah, you!
+
+I don't even know where to start with this release, as there's
+simply a lot to talk about. MZX's world formats and rendering
+architecture have gone through major overhauls, and a multitude
+of bugs have been fixed (60+). Particularly the MZX UI graphical
+glitch that occurred when an SMZX mode was enabled.
+
+Some notable new features are unbound sprites (MZX's new native
+pixel precision support), loading character sets/palettes/source
+code/MZMs from strings, saving MZMs to strings, a new Robotic
+debugger, the SAVE_COUNTERS and LOAD_COUNTERS function counters,
+options to help create standalone game releases, the ability to
+assign character sets/palettes to a board to load on entry, and
+resetting boards on entry. The size limit of Robotic bytecode
+has been increased to 2MB.
+
+Other important mentions: MegaZeux has been updated to use
+SDL 2.0 and libmodplug 0.8.9.0. The SAVE_WORLD function counter
+has been permanently removed. The downver utility has been
+temporarily discontinued, as adapting it to this release would
+have been a considerable amount of work. Instead, there is a new
+option in the Export menu in the editor to export a 2.84 world.
+
+Enjoy, and try not to get overwhelmed by all of the new stuff!
 
 FEATURES
 
 + Added a built-in robot debugger. See the Debug Mode section of
   the help file for details.
-+ Kinds specified as 255 on the char ID table are now treated as
-  custom* kinds when placed and selected in the editor. If you
-  switched a kind to char ID 255 in a game that already had that
-  kind, the parameters will not be changed (and the kinds will
-  still be char 0 if they were already placed in the world).
++ Added the COMMANDS_STOP special counter to MegaZeux. When a
+  robot executes a number of commands exceeding this value while
+  testing, the robot debugger will be enabled automatically and
+  will open. During regular gameplay, it will be ignored. The
+  default value of COMMANDS_STOP is 2000000.
++ The counter debugger now remembers its previous position after
+  being reopened.
++ Added commands_cycle and commands_total variables to the Robot
+  section of the counter debugger. See the Debug Mode section of
+  the help file for details.
++ Certain types specified as 255 on the char ID table are now
+  treated as Custom* types when placed and selected in the
+  editor. If you switched a type to char ID 255 in a game that
+  already had that type, the parameters will not be changed
+  (and the types will still be char 0 if they were already
+  placed in the world). When making a type a Custom* type from
+  the global chars dialog, it will appear visually different in
+  the list and in the character selection window, and also ask
+  for confirmation.
 + The enter menu can be closed with escape now.
 + In the editor, the Backspace key now removes the top layer
   and brings the under layer to the top, as a compliment to Del.
@@ -20,6 +574,110 @@ FEATURES
 + Seeking in the String section of the counter debugger will now
   ignore the $ prefix.
 + Tentative joypad POV hat support added: joyNhat = U, D, L, R
++ The BUTTONS counter has been extended to support the mouse
+  wheel and X1/X2 buttons.
++ Strings can now be used in the LOAD PALETTE "file" command in
+  place of a file name, i.e. LOAD PALETTE "$string+10".
++ Strings can now be used in the LOAD CHAR SET "file" command in
+  place of a file name, i.e. LOAD CHAR SET "@240$chars".
++ Strings can now be used for the special counter LOAD_ROBOT in
+  place of a file name, i.e. set "$str" "LOAD_ROBOT".
++ Strings can now be used for saving and loading MZMs in place
+  of a file name, i.e. put "@$str" image_file... (Lancer-X)
++ Added ESCAPE_MENU counter. When set to 0, this counter will
+  prevent pressing escape from opening the exit gameplay menu.
+  This will not affect any other escape menus in MZX, and the
+  exit gameplay menu can still be opened by other means, such as
+  ALT+F4, CTRL+C, the window close button, etc.
++ Added EXIT_GAME function counter. When set to anything but 0,
+  this will cause MegaZeux to exit to the title screen. This has
+  no effect on the title screen.
++ Added the ternary operator (?:) to expressions. If the value
+  to the left of ? is not equal to zero, the expression between
+  the ? and the : will be evaluated. If the value to the left of
+  ? is equal to zero, the expression to the right of : will be
+  evaluated.
++ Added SAVE_COUNTERS and LOAD_COUNTERS special counters. These
+  will save and load files containing every counter and string
+  from the world they're used in, respectively. These files are
+  not version checked, and may be used like save files.
++ Robots now keep their robot IDs after reloading saves.
++ Added standalone mode. The config parameters standalone_mode
+  and no_titlescreen can now be used (from MZXRun only) to
+  create standalone versions of MZX with the ability to fully
+  customise the player's experience. See config.txt for details.
+  (Lancer-X)
++ The minimal help bar now displays robot memory and the current
+  board mod when contextually appropriate.
++ The minimal help options for the board and robot editors are
+  now enabled by default.
++ Shaders can now be changed from the F2 menu when using the
+  GLSL renderer. The user can select a fragment shader from the
+  assets/shaders/extra/ directory. If a matching vertex shader
+  exists, it will be loaded alongside the fragment shader.
+  Otherwise, MZX will fall back to the default vertex shader.
++ On Linux and Mac OS X the configuration file will be copied
+  into the user's home directory and given the name
+  .megazeux-config if it is not already present. This config
+  file will then be used instead of the global one. (Lancer-X)
++ Added unbound sprites. Sprites can be unbound from the grid by
+  setting spr#_unbound to 1. Their coordinates will now refer to
+  the sprite's location in pixels, not tiles. spr#_width,
+  height, refx and refy still refer to chars; however, spr#_x,
+  y, cx, cy, cwidth and cheight are all in pixels. Unbound
+  sprites do not work with all renderers; currently, out of the
+  renderers available on the PC platforms, the overlay2 renderer
+  lacks this functionality. (Lancer-X)
++ Unbound sprites do not let char 32 or blank characters (when
+  in ccheck 2) through like regular sprites do. Instead, set
+  spr#_tcol to a color that will be transparent when the unbound
+  sprite is drawn. (Lancer-X)
++ Unbound sprites can make use of additional hidden charsets.
+  There are an additional 14 charsets beyond the default that
+  can be modified through using load char set or char edit.
+  (e.g. load char set "@256charset.chr")
+  A sprite can be set to refer to these later chars with the
+  spr#_offset counter. The offset value is then added to each
+  char in the sprite. You can use this to refer to higher char
+  sets.
+  (e.g. set "spr0_offset" 256)
+  Offset values can also be set to locations within a char set.
+  (Lancer-X)
++ To allow you to access the extended charsets, the @ option to
+  load char set now takes up to 4 digits, rather than merely 3.
+  The + option still only allows 2 hex digits. (Lancer-X)
++ The colors used by tiles of a given color # in SMZX mode 3
+  can now be rebound using the "smzx_idx#,#" counters.
+  (e.g. set "smzx_idx7,0" 32)
+  Now if you put down a c07 tile, all 00 pixels will refer to
+  color 32 (as opposed to color 0 in SMZX mode 2 or color 7 in
+  SMZX mode 1). These values are reset whenever the SMZX mode is
+  changed. Once again, this is only available to renderers that
+  support unbound sprites. (Lancer-X)
++ Edited worlds now retain their world version until resaved.
+  Before, they would lose their world version after testing.
++ Added world version display to the debug window.
++ Added GOOP_WALK counter for robots.
++ Added "Reset board on entry" parameter for boards. When set,
+  the board will reset to its original state when the board is
+  entered during gameplay. This setting can be saved as a board
+  default.
++ Added "Load charset on entry" parameter for boards. When set,
+  MegaZeux will load the selected charset file when the board
+  is entered during gameplay. This setting can be saved as a
+  board default.
++ Added "Load palette on entry" parameter for boards. When set,
+  MegaZeux will load the selected palette file when the board
+  is entered during gameplay. This setting can be saved as a
+  board default.
++ Maximum robot size has been increased from 64kb to 2mb.
+  (Lancer-X)
+
++ Debytecode: the LOAD_SOURCE_FILE special counter can now be
+  used to load and compile a robot program from source code.
+  This can be used with either a file or a string as input.
++ Debytecode: the robot editor's import robot menu now supports
+  loading legacy source code.
 
 BUGFIXES
 
@@ -36,8 +694,8 @@ BUGFIXES
   section to be placed into the '#' list.
 + Dialog window labels can not be put into focus by clicking
   them with the mouse anymore.
-+ Dialog windows now wait for a key/mouse release before closing
-  or selecting buttons.
++ Dialog windows closed by pressing escape will now close only
+  on a new press instead of whenever the key is held.
 + Load (F4)/quickload (F10) on invalid save files in-game leaves
   the current game running instead of exiting to the titlescreen
   or editor.
@@ -86,6 +744,77 @@ BUGFIXES
 + Fixed crash bug when attempting to use file counters with
   paths equal to or longer than 512 chars in length. MegaZeux
   will now ignore such paths.
++ Fixed bug where MZX would crash with out-of-bounds joystick
+  key mappings.
++ Fixed a bug where robots could not push the SliderNS type to
+  the south.
++ Fixed a bug where a robot using #return or #top multiple times
+  within a single command could cause a crash.
++ Fixed a port regression where IF ANY would continue to iterate
+  over the board after finding a match, potentially triggering
+  multiple subroutines, #return, or #top labels.
++ Fixed a bug where MZM error messages could repeat indefinitely
+  and lock up MZX.
++ Fixed a bug where the (#)PUSHED label would not be sent to the
+  first object in a row of pushed objects if that object was a
+  robot.
++ Fixed support for PPC Linux builds. (Insidious)
++ Fixed a bug where a robot sent a subroutine would restart the
+  command it was executing upon #return if the command was a
+  multi-cycle command. This fix applies to worlds saved in 2.90
+  and later only.
++ Fixed a bug where ALT+F4 would cause menus to open instead of/
+  in addition to triggering an exit event.
++ Fixed a bug where subdirectory mods with different types of
+  slashes in their names would fail to be recognized as the same
+  mod.
++ Fixed a bug where SMZX palette intensities were not saved.
++ Made the opengl2 and glsl renderers endian-correct. (Lancer-X)
++ Fixed a bug where keystrokes were getting lost during event
+  processing. (Lancer-X)
++ The UI now uses the regular MZX mode and the protected palette
+  when playing SMZX games. This is only available to renderers
+  that support unbound sprites. (Lancer-X)
++ Changing from SMZX mode 1 to 0 correctly restores the palette.
+  (Lancer-X)
++ Fixed a bug where the tree list in the counter debugger would
+  rapidly scroll through elements when clicked.
++ Fixed a bug where the updater, on failing to receive data from
+  the server, would consume large amounts of CPU before timing
+  out. (Lancer-X)
++ Fixed various bugs related to the pushing of sensors.
+  (Lancer-X)
++ Fixed a bug where MZX would crash in some cases when testing
+  after adding/importing new boards into a world.
++ Made KEY a board counter <=2.70. Also added masking <=2.62 to
+  make Oath Demo work again. (Lancer-X)
++ Bullet types shot by robots clamped to 0-2. (Lancer-X)
++ SAVE_GAME and SAVE_WORLD now happen at the end of a cycle, not
+  immediately. (Lancer-X)
++ SAVE_WORLD no longer exists. (Lancer-X)
++ Labels at the end of a program no longer get randomly sorted
+  first and stop the actual first instance of that label being
+  called. This fixes a bug in the Dark Corner 'Zane' demo.
+  (Lancer-X)
++ Copy and copy block in pre-port MZX games now preserves the
+  state of any robots copied. (Lancer-X)
++ Copying and pasting robot code with LF line endings on Windows
+  now works. (Lancer-X)
++ MegaZeux can now be exited during an infinite loop. (Lancer-X)
++ Fixed a bug where SAVE_GAME on the first cycle of a board
+  would cause the game to be faded out on load. This still
+  affects legacy worlds. (Lancer-X)
++ Fixed a bug where trying to create new counters called "fread"
+  or "fread_counter" in the counter debugger would cause the
+  file being read to advance.
++ Fixed a bug where the numpad was unable to be used to control
+  the player, despite being identical to the cursor keys for
+  every other situation. (Lancer-X)
++ Fixed a bug where pre-port worlds could play any number of
+  concurrent samples. This makes portions of Bernard the Bard
+  quite cacophonous. (Lancer-X)
++ Fixed a bug where per-game config files could set options they
+  weren't supposed to be able to.
 
 DEVELOPERS
 
@@ -99,6 +828,24 @@ DEVELOPERS
 + Keycode help diagram replaced with an HTML file (from the
   older PNG file). This will make future updates much easier.
 + Updated NDS, Wii and PSP ports to latest devkitpro toolchains.
++ Updated libmodplug to version 0.8.9.0. (asiekierka)
++ Added experimental libxmp support. (asiekierka)
++ Added experimental libopenmpt support. (asiekierka)
++ New rendering architecture that mostly sits alongside the old
+  rendering architecture. There is a new function implemented by
+  supporting renderers: render_layer(). This provides a layer
+  in a similar form to the text_video array in graphics and
+  expects that to be drawn on the screen. This is called once
+  for each layer that is drawn- this means the board, overlay,
+  UI and sprites. Each layer can have a different SMZX mode,
+  although at the moment this is only used to allow the UI to
+  remain in regular MZX mode while the game or editor is in SMZX
+  mode. The render_layer() function is only called if it is
+  implemented by the renderer and if there is something on the
+  screen that can only be drawn by the renderer (e.g. unbound
+  sprites, or UI elements in an SMZX game) (Lancer-X)
++ LibSDL2 support is now the default. It can still be disabled
+  by passing --disable-libsdl2 to config.sh. (Lancer-X)
 
 
 December 24, 2012 - MZX 2.84c

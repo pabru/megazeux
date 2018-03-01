@@ -24,6 +24,7 @@
 #include "../helpsys.h"
 #include "../sfx.h"
 #include "../window.h"
+#include "../event.h"
 #include "../data.h"
 
 #include "sfx_edit.h"
@@ -136,7 +137,10 @@ void sfx_edit(struct world *mzx_world)
 
   struct element *b_elements[21];
 
-  set_context(97);
+  // Prevent previous keys from carrying through.
+  force_release_all_keys();
+
+  set_context(CTX_SFX_EDITOR);
 
   construct_dialog(&a_di, "Choose SFX mode", 26, 7, 28, 8,
    a_elements, 3, 0);
@@ -158,7 +162,7 @@ void sfx_edit(struct world *mzx_world)
     if((!old_sfx_mode) && (mzx_world->custom_sfx_on))
     {
       char *offset = mzx_world->custom_sfx;
-      for(i = 0; i < NUM_SFX; i++, offset += 69)
+      for(i = 0; i < NUM_SFX; i++, offset += SFX_SIZE)
       {
         strcpy(offset, sfx_strs[i]);
       }
@@ -179,8 +183,8 @@ void sfx_edit(struct world *mzx_world)
         for(i = 0; i < num_elements; i++)
         {
           b_elements[i] = construct_input_box(1, i + 2,
-           sfx_names[(page * 17) + i], 68, 224,
-           mzx_world->custom_sfx + ((i + (page * 17)) * 69));
+           sfx_names[(page * 17) + i], 68, 0,
+           mzx_world->custom_sfx + ((i + (page * 17)) * SFX_SIZE));
         }
 
         b_elements[i] = construct_label(23, 20,
@@ -221,6 +225,9 @@ void sfx_edit(struct world *mzx_world)
   }
 
   destruct_dialog(&a_di);
+
+  // Prevent UI keys from carrying through.
+  force_release_all_keys();
 
   // Done!
   pop_context();

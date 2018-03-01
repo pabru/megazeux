@@ -2,7 +2,7 @@
  *
  * Copyright (C) 1996 Greg Janson
  * Copyright (C) 2004 Gilead Kutnick <exophase@adelphia.net>
- * Copyright (C) 2012 Alice Lauren Rowan <petrifiedrowan@gmail.com>
+ * Copyright (C) 2012 Alice Rowan <petrifiedrowan@gmail.com>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
@@ -53,6 +53,8 @@
 #include <sys/iosupport.h>
 #endif
 
+#include "context_enum.h"
+
 // This context stuff was originally in helpsys, but it's actually
 // more of a property of the windowing system.
 
@@ -60,7 +62,7 @@ static int contexts[128];
 static int curr_context;
 
 // 72 = "No" context link
-__editor_maybe_static int context = 72;
+__editor_maybe_static int context = CTX_MAIN;
 
 void set_context(int c)
 {
@@ -86,10 +88,7 @@ int get_context(void)
 
 #define NUM_SAVSCR 6
 
-// Big fat hack. This will be initialized to a bunch of 0's, or NULLs.
-// Use this to replace the null strings before they get dereferenced.
-
-static struct char_element screen_storage[NUM_SAVSCR][80 * 25];
+static struct char_element screen_storage[NUM_SAVSCR][SET_SCREEN_SIZE];
 
 // Current space for save_screen and restore_screen
 static int cur_screen = 0;
@@ -123,6 +122,7 @@ int restore_screen(void)
 {
   if(cur_screen == 0)
     error("Windowing code bug", 2, 4, 0x1F02);
+
   cur_screen--;
   set_screen(screen_storage[cur_screen]);
   return 0;
@@ -141,7 +141,7 @@ int draw_window_box(int x1, int y1, int x2, int y2, int color,
  int dark_color, int corner_color, int shadow, int fill_center)
 {
   return draw_window_box_ext(x1, y1, x2, y2, color, dark_color,
-   corner_color, shadow, fill_center, 256, 16);
+   corner_color, shadow, fill_center, PRO_CH, 16);
 }
 
 int draw_window_box_ext(int x1, int y1, int x2, int y2, int color,
@@ -241,6 +241,7 @@ int draw_window_box_ext(int x1, int y1, int x2, int y2, int color,
 #define radio_on "(\x07)"
 #define radio_off "( )"
 #define num_buttons " \x18  \x19 "
+#define list_button " \x1F "
 
 #define char_sel_arrows_0 '\x1E'
 #define char_sel_arrows_1 '\x1F'
@@ -258,46 +259,178 @@ int draw_window_box_ext(int x1, int y1, int x2, int y2, int color,
 // Mouse support- Click on a character to select it. If it is the current
 // character, it exits.
 
-__editor_maybe_static int char_selection_ext(int current, int allow_multichar,
- int *width_ptr, int *height_ptr)
+// allow_char_255 -- if this is set to zero, char 255 will have a special
+// display corresponding to Custom* type behavior. This is meant for the char
+// ID editor only.
+
+// TODO this shouldn't really be here, but it's the best place for now.
+__editor_maybe_static int char_select_next_tile(int current_char,
+ int direction, int highlight_width, int highlight_height)
 {
-  int width = 1;
-  int height = 1;
-  int x, y;
-  int i, i2;
-  int key;
+  // -1 is previous, 1 is next
+  int x = current_char & 31;
+  int y = (current_char & 0xFF) >> 5;
+
+  int mod_x = x % highlight_width;
+  int mod_y = y % highlight_height;
+
+  int tiles_width = (32 - mod_x) / highlight_width;
+  int tiles_height = (8 - mod_y) / highlight_height;
+
+  int last_x = (tiles_width - 1) * highlight_width + mod_x;
+  int last_y = (tiles_height - 1) * highlight_height + mod_y;
+
+  if(direction > 0)
+  {
+    if(highlight_height == 1)
+    {
+      // No need for tiling with N x 1 selection
+      x += highlight_width;
+    }
+    else
+
+    if(x == last_x)
+    {
+      x = mod_x;
+
+      if(y == last_y)
+        y = mod_y;
+
+      else
+        y += highlight_height;
+    }
+    else
+    {
+      x += highlight_width;
+    }
+  }
+  else
+
+  if(direction < 0)
+  {
+    if(highlight_height == 1)
+    {
+      x -= highlight_width;
+    }
+    else
+
+    if(x == mod_x)
+    {
+      x = last_x;
+
+      if(y == mod_y)
+        y = last_y;
+
+      else
+        y -= highlight_height;
+    }
+    else
+    {
+      x -= highlight_width;
+    }
+  }
+
+  // Clear the char bits of current_char and replace with the new position
+  current_char &= (~0xFF);
+  current_char |= (x + (y * 32)) & 0xFF;
+
+  return current_char;
+}
+
+__editor_maybe_static int char_selection_ext(int current, int allow_char_255,
+ int *width_ptr, int *height_ptr, int *select_charset, int selection_pal)
+{
+  Uint32 pal_layer = OVERLAY_LAYER;
+  Uint32 chars_layer = UI_LAYER;
+  int allow_multichar = 0;
+  int current_charset = 0;
+  int screen_mode = 0;
   int shifted = 0;
   int highlight_x = 0;
   int highlight_y = 0;
   int start_x = 0;
   int start_y = 0;
+  int width = 1;
+  int height = 1;
+  int exit = 0;
+  int bottom = 16;
+  int x, y;
+  int i, i2;
+  int key;
 
-  if(allow_multichar)
+  if(width_ptr && height_ptr)
   {
+    allow_multichar = 1;
     width = *width_ptr;
     height = *height_ptr;
   }
 
-  // Save screen
-  save_screen();
+  if(select_charset)
+  {
+    pal_layer = create_layer(0, 0, 80, 25, LAYER_DRAWORDER_UI - 2,
+     -1, *select_charset * 256, 1);
 
-  if(context == 72)
-    set_context(98);
-  else
-    set_context(context);
+    chars_layer = create_layer(0, 0, 80, 25, LAYER_DRAWORDER_UI - 1,
+     -1, *select_charset * 256, 1);
+
+    set_layer_mode(chars_layer, 0);
+
+    current_charset = *select_charset;
+    screen_mode = get_screen_mode();
+    bottom++;
+  }
+
+  if(selection_pal < 0)
+  {
+    screen_mode = 0;
+  }
+
+  // Prevent previous keys from carrying through.
+  force_release_all_keys();
+  save_screen();
 
   cursor_off();
 
-  // Draw box
-  draw_window_box(20, 5, 57, 16, DI_MAIN, DI_DARK, DI_CORNER, 1, 1);
-  // Add title
-  if(allow_multichar)
-    write_string(" Select characters ", 22, 5, DI_TITLE, 0);
-  else
-    write_string(" Select a character ", 22, 5, DI_TITLE, 0);
-
   do
   {
+    // Draw box and inner box
+    draw_window_box(20, 5, 57, bottom, DI_MAIN, DI_DARK, DI_CORNER, 1, 1);
+    draw_window_box(22, 6, 55, 15, DI_DARK, DI_MAIN, DI_CORNER, 0, 0);
+
+    // Add title
+    if(allow_multichar)
+      write_string(" Select characters ", 22, 5, DI_TITLE, 0);
+    else
+      write_string(" Select a character ", 22, 5, DI_TITLE, 0);
+
+    if(select_charset)
+    {
+      // Shift layer offsets to display the current charset
+      set_layer_offset(pal_layer, current_charset * 256);
+      set_layer_offset(chars_layer, current_charset * 256);
+
+      write_string("X PgUp \t\t\t\t PgDn X", 22, 16, DI_NONACTIVE, 1);
+      draw_char(char_sel_arrows_3, DI_NONACTIVE, 22, 16);
+      draw_char(char_sel_arrows_2, DI_NONACTIVE, 55, 16);
+
+      if(current_charset)
+      {
+        write_string("Extended Set ## ", 32, 16, DI_TEXT_GREY, 0);
+        write_number(current_charset, DI_TEXT_GREY, 46, 16, 2, 1, 10);
+      }
+      else
+      {
+        write_string(" Main Charset  ", 32, 16, DI_TEXT_GREY, 0);
+      }
+
+      // Clear the UI where the char display will appear
+      for(x = 0; x < 32; x++)
+        for(y = 0; y < 8; y++)
+          erase_char(x + 23, y + 7);
+    }
+
+    select_layer(chars_layer);
+
     // Draw character set
     for(x = 0; x < 32; x++)
     {
@@ -308,11 +441,12 @@ __editor_maybe_static int char_selection_ext(int current, int allow_multichar,
       }
     }
 
-    // Calculate x/y
-    x = (current & 31) + 23;
-    y = (current >> 5) + 7;
+    x = (current & 31);
+    y = (current >> 5);
+
     if(get_shift_status(keycode_internal) && allow_multichar)
     {
+      // Update selection
       if(!shifted)
       {
         highlight_x = x;
@@ -348,7 +482,7 @@ __editor_maybe_static int char_selection_ext(int current, int allow_multichar,
 
         for(i = 0; i < height; i++)
         {
-          color_line(width, start_x, start_y + i, 0x9F);
+          color_line(width, start_x + 23, start_y + i + 7, 0x9F);
         }
       }
     }
@@ -357,6 +491,7 @@ __editor_maybe_static int char_selection_ext(int current, int allow_multichar,
       // Highlight active character(s)
       int char_offset;
       int skip = 32 - width;
+      int x2, y2;
 
       if(shifted == 1)
       {
@@ -372,7 +507,7 @@ __editor_maybe_static int char_selection_ext(int current, int allow_multichar,
 
         x = start_x;
         y = start_y;
-        current = ((y - 7) * 32) + (x - 23);
+        current = (y * 32) + x;
       }
 
       char_offset = current;
@@ -382,25 +517,59 @@ __editor_maybe_static int char_selection_ext(int current, int allow_multichar,
       {
         for(i2 = 0; i2 < width; i2++, char_offset++)
         {
-          draw_char_ext(char_offset, DI_ACTIVE,
-           (char_offset & 31) + 23, ((char_offset & 255) >> 5) + 7, 0, 16);
+          x2 = (char_offset & 31) + 23;
+          y2 = ((char_offset & 255) >> 5) + 7;
+
+          if(screen_mode)
+          {
+            select_layer(chars_layer);
+            erase_char(x2, y2);
+            select_layer(pal_layer);
+            draw_char_ext(char_offset, selection_pal, x2, y2, 0, 0);
+          }
+          else
+
+          if(selection_pal >= 0)
+          {
+            draw_char_ext(char_offset, selection_pal, x2, y2, 0, 0);
+          }
+
+          else
+          {
+            draw_char_ext(char_offset, DI_ACTIVE, x2, y2, 0, 16);
+          }
         }
       }
     }
+
+    select_layer(UI_LAYER);
+
+    // Special display for allow_char_255 == 0
+    if(!allow_char_255)
+    {
+      int color = 0x05;
+
+      if(current == 255)
+        color = 0x0D;
+
+      draw_char('?', color, 31+23, 7+7);
+    }
+
     // Draw arrows
-    draw_window_box(22, 6, 55, 15, DI_DARK, DI_MAIN, DI_CORNER, 0, 0);
-    draw_char(char_sel_arrows_0, DI_TEXT, x, 15);
-    draw_char(char_sel_arrows_1, DI_TEXT, x, 6);
-    draw_char(char_sel_arrows_2, DI_TEXT, 22, y);
-    draw_char(char_sel_arrows_3, DI_TEXT, 55, y);
+    draw_char(char_sel_arrows_0, DI_TEXT, x + 23, 15);
+    draw_char(char_sel_arrows_1, DI_TEXT, x + 23, 6);
+    draw_char(char_sel_arrows_2, DI_TEXT, 22, y + 7);
+    draw_char(char_sel_arrows_3, DI_TEXT, 55, y + 7);
+
     // Write number of character
-    write_number(current, DI_MAIN, 53, 16, 3, 0, 10);
+    write_number(current, DI_MAIN, 53, bottom, 3, 0, 10);
 
     update_screen();
-
-    // Get key
     update_event_status_delay();
-    key = get_key(keycode_internal);
+    key = get_key(keycode_internal_wrt_numlock);
+
+    if(get_exit_status())
+      key = IKEY_ESCAPE;
 
     if(get_mouse_press())
     {
@@ -427,14 +596,14 @@ __editor_maybe_static int char_selection_ext(int current, int allow_multichar,
     {
       case IKEY_ESCAPE:
       {
-        // ESC
-        pop_context();
-        restore_screen();
-
         if(current == 0)
-          return -256;
+          current = -256;
+
         else
-          return -current;
+          current = -current;
+
+        exit = 1;
+        break;
       }
 
       case IKEY_SPACE:
@@ -450,24 +619,48 @@ __editor_maybe_static int char_selection_ext(int current, int allow_multichar,
           {
             width = 1;
             height = 1;
+            break;
           }
 
           x = start_x;
           y = start_y;
-          current = ((y - 7) * 32) + (x - 23);
+          current = (y * 32) + x;
         }
-
-        // Selected
-        pop_context();
-        restore_screen();
 
         if(allow_multichar)
         {
+          if(height > 1)
+          {
+            // Clip if the selection wraps around the edge
+            int abort = 0;
+
+            if(width + x > 32)
+            {
+              width = 32 - x;
+              abort = 1;
+            }
+
+            if(height + y > 8)
+            {
+              height = 8 - y;
+              abort = 1;
+            }
+
+            if(abort)
+              break;
+          }
+
           *width_ptr = width;
           *height_ptr = height;
         }
 
-        return current;
+        if(select_charset)
+        {
+          *select_charset = current_charset;
+        }
+
+        exit = 1;
+        break;
       }
 
       case IKEY_UP:
@@ -506,23 +699,81 @@ __editor_maybe_static int char_selection_ext(int current, int allow_multichar,
         break;
       }
 
+      case IKEY_PAGEUP:
+      {
+        if(select_charset)
+        {
+          current_charset--;
+
+          if(current_charset < 0)
+            current_charset = NUM_CHARSETS - 2;
+        }
+
+        break;
+      }
+
+      case IKEY_PAGEDOWN:
+      {
+        if(select_charset)
+        {
+          current_charset++;
+
+          if(current_charset == NUM_CHARSETS - 1)
+            current_charset = 0;
+        }
+
+        break;
+      }
+
+      case IKEY_KP_MINUS:
+      case IKEY_MINUS:
+      {
+        // Move in tile increment
+        current = char_select_next_tile(current, -1, width, height);
+        break;
+      }
+
+      case IKEY_KP_PLUS:
+      case IKEY_EQUALS:
+      {
+        // Move in tile increment
+        current = char_select_next_tile(current, 1, width, height);
+        break;
+      }
+
       default:
       {
-        // If this is from 32 to 255, jump there.
-        int key_char = get_key(keycode_unicode);
+        if(!current_charset)
+        {
+          // If this is from 32 to 255, jump there.
+          int key_char = get_key(keycode_unicode);
 
-        if(key_char >= 32 && key_char <= 255)
-          current = key_char;
+          if(key_char >= 32 && key_char <= 255)
+            current = key_char;
+        }
 
         break;
       }
     }
-  } while(1);
+  } while(!exit);
+
+  // Get rid of the extra layers required for extended charsets
+  if(select_charset)
+  {
+    destruct_extra_layers(chars_layer);
+    destruct_extra_layers(pal_layer);
+  }
+
+  // Prevent UI keys from carrying through.
+  force_release_all_keys();
+  restore_screen();
+
+  return current;
 }
 
 int char_selection(int current)
 {
-  return char_selection_ext(current, 0, NULL, NULL);
+  return char_selection_ext(current, 1, NULL, NULL, NULL, -1);
 }
 
 __editor_maybe_static void construct_element(struct element *e, int x, int y,
@@ -652,7 +903,9 @@ static int change_current_element(struct world *mzx_world, struct dialog *di,
 
 int run_dialog(struct world *mzx_world, struct dialog *di)
 {
+  int exit;
   int mouse_press;
+  int mouse_drag_state;
   int x = di->x;
   int y = di->y;
   int title_x_offset = x + (di->width / 2) - ((int)strlen(di->title) / 2);
@@ -663,8 +916,8 @@ int run_dialog(struct world *mzx_world, struct dialog *di)
   int current_key, new_key;
   int i;
 
-  if(context == 72)
-    set_context(98);
+  if(context == CTX_MAIN)
+    set_context(CTX_DIALOG_BOX);
   else
     set_context(context);
 
@@ -699,7 +952,7 @@ int run_dialog(struct world *mzx_world, struct dialog *di)
 
     current_element = di->elements[current_element_num];
     update_event_status_delay();
-    current_key = get_key(keycode_internal);
+    current_key = get_key(keycode_internal_wrt_numlock);
 
     new_key = 0;
 
@@ -713,9 +966,12 @@ int run_dialog(struct world *mzx_world, struct dialog *di)
         current_key = new_key;
     }
 
-    mouse_press = get_mouse_press_ext();
+    exit = get_exit_status();
 
-    if(get_mouse_drag() &&
+    mouse_press = get_mouse_press_ext();
+    mouse_drag_state = get_mouse_drag();
+
+    if(mouse_drag_state &&
      (mouse_press <= MOUSE_BUTTON_RIGHT) &&
      (current_element->drag_function))
     {
@@ -732,7 +988,8 @@ int run_dialog(struct world *mzx_world, struct dialog *di)
     }
     else
 
-    if((mouse_press && (mouse_press <= MOUSE_BUTTON_RIGHT))
+    if((mouse_press && (mouse_press <= MOUSE_BUTTON_RIGHT)
+     && !mouse_drag_state)
      || (new_key == -1))
     {
       do
@@ -753,8 +1010,6 @@ int run_dialog(struct world *mzx_world, struct dialog *di)
           current_element = di->elements[element_under];
           highlight_element(mzx_world, di, element_under);
 
-          wait_for_mouse_release(mouse_press);
-
           new_key = current_element->click_function(mzx_world, di,
            current_element, mouse_press,
            mouse_x - di->x - current_element->x,
@@ -773,8 +1028,6 @@ int run_dialog(struct world *mzx_world, struct dialog *di)
 
           if(current_element->click_function)
           {
-            wait_for_mouse_release(mouse_press);
-
             new_key = current_element->click_function(mzx_world, di,
              current_element, mouse_press,
              mouse_x - di->x - current_element->x,
@@ -785,6 +1038,9 @@ int run_dialog(struct world *mzx_world, struct dialog *di)
           }
         }
       } while(new_key == -1);
+
+      if(get_exit_status())
+        exit = 1;
     }
     else
 
@@ -869,20 +1125,21 @@ int run_dialog(struct world *mzx_world, struct dialog *di)
 
       case IKEY_ESCAPE: // ESC
       {
-        //Only work on press.  Ignore autorepeat.
-        if (get_key_status(keycode_internal, IKEY_ESCAPE) != 1)
-          break;
+        // Only work on press.  Ignore autorepeat.
+        if(get_key_status(keycode_internal, IKEY_ESCAPE) == 1)
+          exit = 1;
 
-        // Restore screen, set current, and return -1
-        wait_for_key_release(IKEY_ESCAPE);
-        pop_context();
-        return -1;
+        break;
       }
 
 #ifdef CONFIG_HELPSYS
       case IKEY_F1: // F1
       {
-        help_system(mzx_world);
+        if(!mzx_world->conf.standalone_mode ||
+         get_counter(mzx_world, "HELP_MENU", 0))
+        {
+          help_system(mzx_world);
+        }
         break;
       }
 #endif
@@ -892,6 +1149,15 @@ int run_dialog(struct world *mzx_world, struct dialog *di)
         break;
       }
     }
+
+    // ESC or exit event
+    if(exit)
+    {
+      force_release_all_keys();
+      pop_context();
+      return -1;
+    }
+
   } while(di->done != 1);
 
   pop_context();
@@ -903,7 +1169,19 @@ static int find_entry(const char **choices, char *name, int total_num)
 {
   int current_entry;
   int cmpval = 0;
+  int offset = 0;
   size_t name_length = strlen(name);
+
+  // Hack so seeking works on the string counter debugger without
+  // having to press '$'. Probably shouldn't be here, but oh well.
+  // Most lists are alphabetically sorted or have things like (new)
+  // at the end, so only enable if the first and last elements start
+  // with '$'.
+
+  if(total_num && choices[0][0] == '$' && choices[total_num - 1][0] == '$')
+  {
+    offset = 1;
+  }
 
   for(current_entry = 0; current_entry < total_num; current_entry++)
   {
@@ -917,7 +1195,7 @@ static int find_entry(const char **choices, char *name, int total_num)
     else
 #endif
 
-    cmpval = strncasecmp(name, choices[current_entry]+(int)(choices[current_entry][0] == '$'), name_length);
+    cmpval = strncasecmp(name, choices[current_entry] + offset, name_length);
 
     if(cmpval == 0)
     {
@@ -938,9 +1216,9 @@ static void draw_label(struct world *mzx_world, struct dialog *di,
   int y = di->y + e->y;
 
   if(src->respect_colors)
-    color_string_ext(src->text, x, y, DI_TEXT, 256, 16, true);
+    color_string_ext(src->text, x, y, DI_TEXT, PRO_CH, 16, true);
   else
-    write_string_ext(src->text, x, y, DI_TEXT, true, 256, 16);
+    write_string_ext(src->text, x, y, DI_TEXT, true, PRO_CH, 16);
 }
 
 static void draw_input_box(struct world *mzx_world, struct dialog *di,
@@ -1049,6 +1327,36 @@ static void draw_number_box(struct world *mzx_world, struct dialog *di,
     // Buttons
     write_string(num_buttons, x + 7, y, DI_ARROWBUTTON, 0);
   }
+}
+
+static void draw_file_selector(struct world *mzx_world, struct dialog *di,
+ struct element *e, int color, int active)
+{
+  struct file_selector *src = (struct file_selector *)e;
+  int x = di->x + e->x;
+  int y = di->y + e->y;
+  int width = e->width;
+  char *path = src->result;
+  int len = strlen(path);
+
+  write_string(src->title, x, y, color, 0);
+  fill_line(width, x, y + 1, 32, DI_LIST);
+
+  if(path[0])
+  {
+    if(len > width-5)
+    {
+      path = path + len - (width-5);
+    }
+    write_string(path, x + 1, y + 1, DI_LIST, 0);
+  }
+  else
+  {
+    write_string(src->none_mesg, x + 1, y + 1, DI_LIST, 0);
+  }
+
+  // Draw button
+  write_string(list_button, x + width - 3, y + 1, DI_ARROWBUTTON, 0);
 }
 
 #define MAX_NAME_BUFFER 512
@@ -1219,10 +1527,15 @@ static int key_button(struct world *mzx_world, struct dialog *di,
     case IKEY_SPACE:
     case IKEY_RETURN:
     {
+      // 0=not pressed (i.e. this is a fake press from clicking)
+      // 1=pressed
+      // 2=repeat. We want to ignore that.
+      if (get_key_status(keycode_internal_wrt_numlock, key) > 1)
+        return 0;
+
       // Flag that the dialog is done processing
       di->done = 1;
       di->return_value = src->return_value;
-      wait_for_key_release(key);
       break;
     }
 
@@ -1311,7 +1624,11 @@ static int key_number_box(struct world *mzx_world, struct dialog *di,
       }
 
       *(src->result) = result;
+
+      // Fall through to allow for an empty box.
     }
+
+    /* fallthrough */
 
     default:
     {
@@ -1368,6 +1685,47 @@ static int key_number_box(struct world *mzx_world, struct dialog *di,
 
     *(src->result) = current_value;
   }
+  return 0;
+}
+
+static int key_file_selector(struct world *mzx_world, struct dialog *di,
+ struct element *e, int key)
+{
+  struct file_selector *src = (struct file_selector *)e;
+
+  switch(key)
+  {
+    case IKEY_SPACE:
+    case IKEY_RETURN:
+    {
+      char new_path[MAX_PATH] = { 0 };
+      strcpy(new_path, src->base_path);
+
+      if(!choose_file_ch(mzx_world, src->file_manager_exts, new_path,
+       src->file_manager_title, 2))
+      {
+        strcpy(src->result, new_path);
+        di->done = 1;
+        di->return_value = src->return_value;
+      }
+
+      break;
+    }
+
+    case IKEY_DELETE:
+    case IKEY_BACKSPACE:
+    {
+      if(src->allow_unset)
+        src->result[0] = 0;
+      break;
+    }
+
+    default:
+    {
+      return key;
+    }
+  }
+
   return 0;
 }
 
@@ -1540,6 +1898,9 @@ static int key_list_box(struct world *mzx_world, struct dialog *di,
 
   *(src->result) = current_choice;
 
+  if(src->result_offset)
+    *(src->result_offset) = src->scroll_offset;
+
   return 0;
 }
 
@@ -1581,7 +1942,6 @@ static int click_button(struct world *mzx_world, struct dialog *di,
 {
   if(!new_active)
   {
-    di->done = 1;
     return IKEY_RETURN;
   }
 
@@ -1599,7 +1959,7 @@ static int click_number_box(struct world *mzx_world, struct dialog *di,
     (src->upper_limit < 10) && (!src->mult_five))
   {
     // Select number IF on the number line itself
-    mouse_x -= (int)strlen(src->question);
+    mouse_x += 7;
     if((mouse_x < src->upper_limit) && (mouse_x >= 0))
       *(src->result) = mouse_x + 1;
   }
@@ -1617,6 +1977,46 @@ static int click_number_box(struct world *mzx_world, struct dialog *di,
   }
 
   return 0;
+}
+
+static int drag_number_box(struct world *mzx_world, struct dialog *di,
+ struct element *e, int mouse_button, int mouse_x, int mouse_y)
+{
+  struct number_box *src = (struct number_box *)e;
+  int mouse_press = get_mouse_press();
+
+  mouse_x -= (int)strlen(src->question) + 7;
+
+  if((src->lower_limit == 1) &&
+    (src->upper_limit < 10) && (!src->mult_five))
+  {
+    // Select number IF on the number line itself
+    mouse_x += 7;
+    if((mouse_x < src->upper_limit) && (mouse_x >= 0))
+      *(src->result) = mouse_x + 1;
+  }
+  else
+
+  // get_mouse_press() has repeating, which we want here.
+  if((mouse_x >= 0) && (mouse_x <= 2) && mouse_press)
+  {
+    return IKEY_UP;
+  }
+  else
+
+  if((mouse_x >= 3) && (mouse_y <= 5) && mouse_press)
+  {
+    return IKEY_DOWN;
+  }
+
+  return 0;
+}
+
+static int click_file_selector(struct world *mzx_world, struct dialog *di,
+ struct element *e, int mouse_button, int mouse_x, int mouse_y,
+ int new_active)
+{
+  return IKEY_RETURN;
 }
 
 static int click_list_box(struct world *mzx_world, struct dialog *di,
@@ -1683,6 +2083,9 @@ static int click_list_box(struct world *mzx_world, struct dialog *di,
       }
     }
   }
+
+  if(src->result_offset)
+    *(src->result_offset) = scroll_offset;
 
   return 0;
 }
@@ -1859,16 +2262,41 @@ struct element *construct_number_box(int x, int y,
     width += 13;
 
   construct_element(&(src->e), x, y, width, 1,
-   draw_number_box, key_number_box, click_number_box, NULL, NULL);
+   draw_number_box, key_number_box, click_number_box, drag_number_box, NULL);
+
+  return (struct element *)src;
+}
+
+struct element *construct_file_selector(int x, int y,
+ const char *title, const char *file_manager_title,
+ const char *const *file_manager_exts, const char *none_mesg,
+ int show_width, int allow_unset, const char *base_path, char *result,
+ int return_value)
+{
+  struct file_selector *src = cmalloc(sizeof(struct file_selector));
+
+  src->title = title;
+  src->file_manager_title = file_manager_title;
+  src->file_manager_exts = file_manager_exts;
+  src->base_path = base_path;
+  src->none_mesg = none_mesg;
+  src->allow_unset = allow_unset;
+  src->return_value = return_value;
+  src->result = result;
+
+  construct_element(&(src->e), x, y, show_width + 3,
+   2, draw_file_selector, key_file_selector, click_file_selector,
+   NULL, NULL);
 
   return (struct element *)src;
 }
 
 __editor_maybe_static struct element *construct_list_box(int x, int y,
  const char **choices, int num_choices, int num_choices_visible,
- int choice_length, int return_value, int *result, bool respect_color_codes)
+ int choice_length, int return_value, int *result, int *result_offset,
+ bool respect_color_codes)
 {
-  int scroll_offset = *result - (num_choices_visible / 2);
+  int scroll_offset;
 
   struct list_box *src = cmalloc(sizeof(struct list_box));
   src->choices = choices;
@@ -1876,11 +2304,18 @@ __editor_maybe_static struct element *construct_list_box(int x, int y,
   src->num_choices_visible = num_choices_visible;
   src->choice_length = choice_length;
   src->result = result;
+  src->result_offset = result_offset;
   src->return_value = return_value;
   src->key_position = 0;
   src->last_keypress_time = 0;
   src->clicked_scrollbar = 0;
   src->respect_color_codes = respect_color_codes;
+
+  if(result_offset)
+    scroll_offset = *result_offset;
+
+  else
+    scroll_offset = *result - (num_choices_visible / 2);
 
   if(scroll_offset < 0)
     scroll_offset = 0;
@@ -1910,6 +2345,9 @@ int confirm(struct world *mzx_world, const char *str)
   struct element *elements[2];
   int dialog_result;
 
+  // Prevent previous keys from carrying through.
+  force_release_all_keys();
+
   elements[0] = construct_button(15, 2, "OK", 0);
   elements[1] = construct_button(37, 2, "Cancel", 1);
   construct_dialog(&di, str, 10, 9, 60, 5, elements,
@@ -1917,6 +2355,9 @@ int confirm(struct world *mzx_world, const char *str)
 
   dialog_result = run_dialog(mzx_world, &di);
   destruct_dialog(&di);
+
+  // Prevent UI keys from carrying through.
+  force_release_all_keys();
 
   return dialog_result;
 }
@@ -1931,6 +2372,9 @@ int confirm_input(struct world *mzx_world, const char *name,
 
   int input_length = 32;
 
+  // Prevent previous keys from carrying through.
+  force_release_all_keys();
+
   // Don't pass anything through that isn't this big plz
   str[input_length] = '\0';
 
@@ -1941,6 +2385,9 @@ int confirm_input(struct world *mzx_world, const char *name,
 
   dialog_result = run_dialog(mzx_world, &di);
   destruct_dialog(&di);
+
+  // Prevent UI keys from carrying through.
+  force_release_all_keys();
 
   return dialog_result;
 }
@@ -1956,6 +2403,9 @@ int ask_yes_no(struct world *mzx_world, char *str)
 
   int yes_button_pos;
   int no_button_pos;
+
+  // Prevent previous keys from carrying through.
+  force_release_all_keys();
 
   // Is this string too long for the normal ask dialog?
   if(str_length > 56)
@@ -1996,6 +2446,9 @@ int ask_yes_no(struct world *mzx_world, char *str)
   dialog_result = run_dialog(mzx_world, &di);
   destruct_dialog(&di);
 
+  // Prevent UI keys from carrying through.
+  force_release_all_keys();
+
   return dialog_result;
 }
 
@@ -2019,11 +2472,11 @@ static int sort_function(const void *dest_str_ptr, const void *src_str_ptr)
 
 #define FILESEL_MAX_ELEMENTS  64
 #define FILESEL_BASE_ELEMENTS 7
-#define FILESEL_FILE_LIST     0
-#define FILESEL_DIR_LIST      1
-#define FILESEL_FILENAME      2
-#define FILESEL_OKAY_BUTTON   3
-#define FILESEL_CANCEL_BUTTON 4
+#define FILESEL_OKAY_BUTTON   0
+#define FILESEL_CANCEL_BUTTON 1
+#define FILESEL_FILE_LIST     2
+#define FILESEL_DIR_LIST      3
+#define FILESEL_FILENAME      4
 #define FILESEL_FILES_LABEL   5
 #define FILESEL_DIRS_LABEL    6
 
@@ -2223,7 +2676,8 @@ __editor_maybe_static int file_manager(struct world *mzx_world,
   char *current_dir_name;
   char current_dir_short[56];
   size_t current_dir_length;
-  char *previous_dir_name;
+  char *return_dir_name;
+  char *base_dir_name;
   int total_filenames_allocated;
   int total_dirnames_allocated;
   char **file_list;
@@ -2245,26 +2699,40 @@ __editor_maybe_static int file_manager(struct world *mzx_world,
   int drive_letter_bitmap;
 #endif
 
+  // Buffers for the return file's path and name.
   char ret_path[MAX_PATH];
   char ret_file[MAX_PATH];
+
+  // Prevent previous keys from carrying through.
+  force_release_all_keys();
 
   // These are stack heavy so put them on the heap
   // This function is not performance sensitive anyway.
   file_name = cmalloc(PATH_BUF_LEN);
+
+  // The current directory the file manager is in.
   current_dir_name = cmalloc(MAX_PATH);
-  previous_dir_name = cmalloc(MAX_PATH);
+
+  // Where the file manager is allowed to search.
+  base_dir_name = cmalloc(MAX_PATH);
+
+  // Where the file manager needs to return on exit.
+  return_dir_name = cmalloc(MAX_PATH);
 
   if(allow_new)
     last_element = FILESEL_FILENAME;
 
-  getcwd(previous_dir_name, MAX_PATH);
+  getcwd(return_dir_name, MAX_PATH);
+  strcpy(current_dir_name, return_dir_name);
 
-  strcpy(current_dir_name, previous_dir_name);
-
-  // If ret is in a different dir, make that the current dir
+  // Split the input path (it may be a directory)
   split_path_filename(ret, ret_path, MAX_PATH, ret_file, MAX_PATH);
+
+  // We may be searching in a base directory that isn't the cwd.
   if(ret_path[0])
     change_dir_name(current_dir_name, ret_path);
+
+  strcpy(base_dir_name, current_dir_name);
 
   while(return_value == 1)
   {
@@ -2284,6 +2752,17 @@ __editor_maybe_static int file_manager(struct world *mzx_world,
     if(!dir_open(&current_dir, current_dir_name))
       goto skip_dir;
 
+    #ifdef CONFIG_3DS
+    if(dirs_okay == 1 && strlen(current_dir_name) > 1)
+    {
+      dir_list[num_dirs] = cmalloc(3);
+      dir_list[num_dirs][0] = '.';
+      dir_list[num_dirs][1] = '.';
+      dir_list[num_dirs][2] = '\0';
+      num_dirs++;
+    }
+    #endif
+
     while(1)
     {
       if(!dir_get_next_entry(&current_dir, file_name))
@@ -2300,7 +2779,7 @@ __editor_maybe_static int file_manager(struct world *mzx_world,
           // Exclude .. from base dir in subdirsonly mode
           if(dirs_okay &&
            !(dirs_okay == 2 && !strcmp(file_name, "..") &&
-             !strcmp(current_dir_name, previous_dir_name) ))
+             !strcmp(current_dir_name, base_dir_name) ))
           {
             dir_list[num_dirs] = cmalloc(file_name_length + 1);
             strncpy(dir_list[num_dirs], file_name, file_name_length);
@@ -2313,16 +2792,14 @@ __editor_maybe_static int file_manager(struct world *mzx_world,
           // Must match one of the wildcards, also ignore the .
           if(file_name_length >= 4)
           {
-            if(file_name[file_name_length - 4] == '.')
-              ext_pos = (ssize_t)file_name_length - 4;
-            else if(file_name[file_name_length - 3] == '.')
-              ext_pos = (ssize_t)file_name_length - 3;
-            else
-              ext_pos = 0;
+            // Find the extension.
+            for(ext_pos = file_name_length - 1; ext_pos >= 0; ext_pos--)
+              if(file_name[ext_pos] == '.')
+                break;
 
             for(i = 0; wildcards[i] != NULL; i++)
             {
-              if(!strcasecmp(file_name + ext_pos, wildcards[i]))
+              if(ext_pos >= 0 && !strcasecmp(file_name + ext_pos, wildcards[i]))
               {
                 file_list[num_files] = cmalloc(56 + file_name_length + 1);
 
@@ -2384,7 +2861,7 @@ __editor_maybe_static int file_manager(struct world *mzx_world,
     dir_close(&current_dir);
 skip_dir:
 
-    chdir(previous_dir_name);
+    chdir(return_dir_name);
 
     qsort(file_list, num_files, sizeof(char *), sort_function);
     qsort(dir_list, num_dirs, sizeof(char *), sort_function);
@@ -2463,10 +2940,10 @@ skip_dir:
 
     elements[FILESEL_FILE_LIST] =
      construct_list_box(2, 2, (const char **)file_list, num_files,
-     list_length, 55, 1, &chosen_file, true);
+     list_length, 55, 1, &chosen_file, NULL, true);
     elements[FILESEL_DIR_LIST] =
      construct_list_box(59, 2, (const char **)dir_list, num_dirs,
-     list_length, 15, 2, &chosen_dir, true);
+     list_length, 15, 2, &chosen_dir, NULL, true);
     elements[FILESEL_FILENAME] =
      construct_input_box(2, list_length + 3, "", 55,
      0, ret);
@@ -2491,6 +2968,9 @@ skip_dir:
 
     dialog_result = run_dialog(mzx_world, &di);
 
+    // Prevent UI keys from carrying through.
+    force_release_all_keys();
+
     // If there's a path on ret, change to it.  Make ret absolute.
     switch(dialog_result)
     {
@@ -2506,9 +2986,7 @@ skip_dir:
           change_dir_name(current_dir_name, ret_path);
 
         if(ret_file[0])
-          snprintf(ret, MAX_PATH, "%s%s%s",
-           current_dir_name, DIR_SEPARATOR, ret_file);
-
+          join_path_names(ret, MAX_PATH, current_dir_name, ret_file);
       }
     }
 
@@ -2544,8 +3022,7 @@ skip_dir:
         // the complete name
         if(di.current_element == FILESEL_FILE_LIST &&
          strcmp(ret_file, file_list[chosen_file] + 56))
-          snprintf(ret, MAX_PATH, "%s%s%s",
-           current_dir_name, DIR_SEPARATOR, file_list[chosen_file] + 56);
+          join_path_names(ret, MAX_PATH, current_dir_name, file_list[chosen_file] + 56);
 
         if(default_ext)
           add_ext(ret, default_ext);
@@ -2609,8 +3086,7 @@ skip_dir:
         if(!confirm_input(mzx_world, "Create New Directory",
          "New directory name:", new_name))
         {
-          snprintf(full_name, MAX_PATH, "%s%s%s",
-            current_dir_name, DIR_SEPARATOR, new_name);
+          join_path_names(full_name, MAX_PATH, current_dir_name, new_name);
 
           if(stat(full_name, &file_info) < 0)
           {
@@ -2659,10 +3135,8 @@ skip_dir:
 
         if(!confirm_input(mzx_world, "Rename File", "New file name:", new_name))
         {
-          snprintf(old_path, MAX_PATH, "%s%s%s", current_dir_name,
-           DIR_SEPARATOR, file_list[chosen_file] + 56);
-          snprintf(new_path, MAX_PATH, "%s%s%s", current_dir_name,
-           DIR_SEPARATOR, new_name);
+          join_path_names(old_path, MAX_PATH, current_dir_name, file_list[chosen_file] + 56);
+          join_path_names(new_path, MAX_PATH, current_dir_name, new_name);
 
           if(strcmp(old_path, new_path))
             if(rename(old_path, new_path))
@@ -2690,8 +3164,7 @@ skip_dir:
           if(!confirm(mzx_world, confirm_string))
           {
             char file_name_ch[MAX_PATH];
-            snprintf(file_name_ch, MAX_PATH, "%s%s%s",
-             current_dir_name, DIR_SEPARATOR, dir_list[chosen_dir]);
+            join_path_names(file_name_ch, MAX_PATH, current_dir_name, dir_list[chosen_dir]);
 
             if(!ask_yes_no(mzx_world,
              (char *)"Delete subdirectories recursively?"))
@@ -2723,10 +3196,8 @@ skip_dir:
 
           if(!confirm_input(mzx_world, "Rename Directory", "New directory name:", new_name))
           {
-            snprintf(old_path, MAX_PATH, "%s%s%s", current_dir_name,
-             DIR_SEPARATOR, dir_list[chosen_dir]);
-            snprintf(new_path, MAX_PATH, "%s%s%s", current_dir_name,
-             DIR_SEPARATOR, new_name);
+            join_path_names(old_path, MAX_PATH, current_dir_name, dir_list[chosen_dir]);
+            join_path_names(new_path, MAX_PATH, current_dir_name, new_name);
 
             if(strcmp(old_path, new_path))
               if(rename(old_path, new_path))
@@ -2745,20 +3216,24 @@ skip_dir:
     // No unallowed paths kthx
     if(dirs_okay != 1)
     {
-      // If the base path isn't part of the return path, or if there's an
-      // unallowed subdirectory.
-      if(strncmp(previous_dir_name, current_dir_name, strlen(previous_dir_name)) ||
-         (!dirs_okay &&
-          strstr(current_dir_name + strlen(previous_dir_name), DIR_SEPARATOR)))
+      // If the base path isn't part of the return path
+      if(strncmp(base_dir_name, current_dir_name, strlen(base_dir_name)) ||
+       strstr(current_dir_name, "..") ||
+
+      // or if there's an unallowed subdirectory
+       (!dirs_okay &&
+        strstr(current_dir_name + strlen(base_dir_name), DIR_SEPARATOR)))
       {
         debug("some1 dropped da ball!!!!!!11\n");
-        strcpy(current_dir_name, previous_dir_name);
+        strcpy(current_dir_name, base_dir_name);
         return_value = 1;
         ret[0] = 0;
       }
       else
+
+      if(!strcmp(base_dir_name, return_dir_name))
       {
-        strcpy(ret_file, ret + strlen(previous_dir_name) + 1);
+        strcpy(ret_file, ret + strlen(base_dir_name) + 1);
         strcpy(ret, ret_file);
       }
     }
@@ -2795,7 +3270,8 @@ skip_dir:
     ret[0] = 0;
   }
 
-  free(previous_dir_name);
+  free(base_dir_name);
+  free(return_dir_name);
   free(current_dir_name);
   free(file_name);
 

@@ -29,11 +29,13 @@ __M_BEGIN_DECLS
 
 #include "world_struct.h"
 
+#include "context_enum.h"
+
 CORE_LIBSPEC void set_context(int c);
 CORE_LIBSPEC void pop_context(void);
 
 // For name seeking in list_menu
-#define TIME_SUSPEND 300
+#define TIME_SUSPEND 500
 
 // All screen-affecting code preserves the mouse cursor
 CORE_LIBSPEC int save_screen(void);
@@ -182,6 +184,7 @@ struct list_box
   int return_value;
   const char **choices;
   int *result;
+  int *result_offset;
   int scroll_offset;
   char key_buffer[64];
   int key_position;
@@ -198,6 +201,19 @@ struct board_list
   int *result;
 };
 
+struct file_selector
+{
+  struct element e;
+  const char *title;
+  const char *file_manager_title;
+  const char *const *file_manager_exts;
+  const char *base_path;
+  const char *none_mesg;
+  int allow_unset;
+  int return_value;
+  char *result;
+};
+
 CORE_LIBSPEC void construct_dialog(struct dialog *src, const char *title,
  int x, int y, int width, int height, struct element **elements,
  int num_elements, int start_element);
@@ -211,6 +227,11 @@ CORE_LIBSPEC struct element *construct_button(int x, int y, const char *label,
 CORE_LIBSPEC struct element *construct_number_box(int x, int y,
  const char *question, int lower_limit, int upper_limit,
  int mult_five, int *result);
+CORE_LIBSPEC struct element *construct_file_selector(int x, int y,
+ const char *title, const char *file_manager_title,
+ const char *const *file_manager_exts, const char *none_mesg,
+ int show_width, int allow_unset, const char *base_path, char *result,
+ int return_value);
 
 CORE_LIBSPEC int choose_file_ch(struct world *mzx_world,
  const char *const *wildcards, char *ret, const char *title, int dirs_okay);
@@ -231,6 +252,7 @@ CORE_LIBSPEC void meter_interior(unsigned int progress, unsigned int out_of);
 #define DI_TITLE            31
 #define DI_LINE             16
 #define DI_TEXT             27
+#define DI_TEXT_GREY        23
 #define DI_NONACTIVE        25
 #define DI_ACTIVE           31
 #define DI_INPUT            159
@@ -246,6 +268,13 @@ CORE_LIBSPEC void meter_interior(unsigned int progress, unsigned int out_of);
 #define DI_PCDOT            144
 #define DI_ACTIVELIST       249
 #define DI_SEMIACTIVELIST   159
+
+#define DI_GREY             143
+#define DI_GREY_DARK        128
+#define DI_GREY_CORNER      135
+#define DI_GREY_TEXT        143
+#define DI_GREY_NUMBER      142
+#define DI_GREY_EDIT        126
 
 #define DI_INPUT_BOX        76
 #define DI_INPUT_BOX_DARK   64
@@ -283,18 +312,22 @@ CORE_LIBSPEC void construct_element(struct element *e, int x, int y,
   struct element *e, int mouse_button, int mouse_x, int mouse_y),
  int (* idle_function)(struct world *mzx_world, struct dialog *di,
   struct element *e));
+CORE_LIBSPEC struct element *construct_input_box(int x, int y,
+ const char *question, int max_length, int input_flags, char *result);
 CORE_LIBSPEC struct element *construct_list_box(int x, int y,
  const char **choices, int num_choices, int num_choices_visible,
- int choice_length, int return_value, int *result, bool respect_color_codes);
+ int choice_length, int return_value, int *result, int *result_offset,
+ bool respect_color_codes);
 CORE_LIBSPEC void construct_dialog_ext(struct dialog *src, const char *title,
  int x, int y, int width, int height, struct element **elements,
  int num_elements, int sfx_test_for_input, int pad_space, int start_element,
  int (* idle_function)(struct world *mzx_world, struct dialog *di, int key));
 
-CORE_LIBSPEC int char_selection_ext(int current, int allow_multichar,
- int *width_ptr, int *height_ptr);
-CORE_LIBSPEC struct element *construct_input_box(int x, int y,
- const char *question, int max_length, int input_flags, char *result);
+CORE_LIBSPEC int char_selection_ext(int current, int allow_char_255,
+ int *width_ptr, int *height_ptr, int *charset, int selection_pal);
+CORE_LIBSPEC int char_select_next_tile(int current_char,
+ int direction, int highlight_width, int highlight_height);
+
 CORE_LIBSPEC int file_manager(struct world *mzx_world,
  const char *const *wildcards, const char *default_ext, char *ret,
  const char *title, int dirs_okay, int allow_new,

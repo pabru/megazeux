@@ -1,8 +1,8 @@
 Source: megazeux
 Section: games
 Priority: extra
-Maintainer: Alistair John Strachan <alistair@devzero.co.uk>
-Build-Depends: debhelper (>= 5), libsdl1.2-dev, libvorbis-dev, libpng-dev, zlib1g-dev
+Maintainer: Dylan James Morrison <dylanjmorrison611@gmail.com>
+Build-Depends: debhelper (>= 5), libsdl2-dev, libvorbis-dev, libpng-dev, zlib1g-dev
 Standards-Version: 3.8.0
 
 Package: megazeux
@@ -10,7 +10,7 @@ Architecture: any
 Depends: ${shlibs:Depends}, ${misc:Depends}
 Description: A simple game creation system (GCS)
  MegaZeux is a Game Creation System (GCS), inspired by Epic MegaGames' ZZT,
- first released by Gregory Janson in 1994. It was recently ported from 16bit
+ first released by Alexis Janson in 1994. It was recently ported from 16bit
  MSDOS C/ASM to portable SDL C/C++, improving its platform support and
  hardware compatibility.
  .

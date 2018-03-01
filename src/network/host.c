@@ -80,6 +80,7 @@ struct host
   int proto;
   int af;
   int fd;
+  Uint32 timeout_ms;
 };
 
 static inline bool __host_last_error_fatal(void)
@@ -438,10 +439,10 @@ static bool socket_load_syms(void)
 
   for(i = 0; socksyms_map[i].name; i++)
   {
-    *socksyms_map[i].sym_ptr =
-     SDL_LoadFunction(socksyms.handle, socksyms_map[i].name);
+    void **sym_ptr = (void **)socksyms_map[i].sym_ptr;
+    *sym_ptr = SDL_LoadFunction(socksyms.handle, socksyms_map[i].name);
 
-    if(!*socksyms_map[i].sym_ptr)
+    if(!*sym_ptr)
     {
       // Skip these NT 5.1 WS2 extensions; we can fall back
       if((strcmp(socksyms_map[i].name, "freeaddrinfo") == 0) ||
@@ -701,6 +702,7 @@ struct host *host_create(enum host_type type, enum host_family fam)
   h->proto = proto;
   h->af = af;
   h->fd = fd;
+  h->timeout_ms = HOST_TIMEOUT_DEFAULT;
   return h;
 }
 
@@ -711,6 +713,11 @@ void host_destroy(struct host *h)
     platform_close(h->fd);
     free(h);
   }
+}
+
+void host_set_timeout_ms(struct host *h, int timeout_ms)
+{
+  h->timeout_ms = timeout_ms;
 }
 
 static bool __send(struct host *h, const void *buffer, size_t len)
@@ -727,8 +734,8 @@ static bool __send(struct host *h, const void *buffer, size_t len)
   {
     now = get_ticks();
 
-    // time out in 10 seconds if no data is sent
-    if(now - start > 10 * 1000)
+    // time out if no data is sent
+    if(now - start > h->timeout_ms)
       return false;
 
     // normally it won't all get through at once
@@ -766,22 +773,21 @@ static bool __recv(struct host *h, void *buffer, unsigned int len)
   {
     now = get_ticks();
 
-    // time out in 10 seconds if no data is received
-    if(now - start > 10 * 1000)
+    // time out if no data is received
+    if(now - start > h->timeout_ms)
       return false;
 
     // normally it won't all get through at once
     count = platform_recv(h->fd, &buf[pos], len - pos, 0);
-    if(count < 0)
+    if(count < 0 && host_last_error_fatal())
     {
-      // non-blocking socket, so can fail and still be ok
-      if(!host_last_error_fatal())
-      {
-        count = 0;
-        continue;
-      }
-
       return false;
+    } else if (count <= 0) {
+      // non-blocking socket, so can fail and still be ok
+      // Add a short delay to prevent excessive CPU use
+      delay(10);
+      count = 0;
+      continue;
     }
 
     if(h->cancel_cb && h->cancel_cb())

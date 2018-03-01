@@ -41,6 +41,7 @@ void render_gl2_register(struct renderer *renderer);
 #endif
 #if defined(CONFIG_RENDER_GL_PROGRAM)
 void render_glsl_register(struct renderer *renderer);
+void render_auto_glsl_register(struct renderer *renderer);
 #endif
 #if defined(CONFIG_RENDER_YUV)
 void render_yuv1_register(struct renderer *renderer);
@@ -51,6 +52,9 @@ void render_gp2x_register(struct renderer *renderer);
 #endif
 #if defined(CONFIG_NDS)
 void render_nds_register(struct renderer *renderer);
+#endif
+#if defined(CONFIG_3DS)
+void render_ctr_register(struct renderer *renderer);
 #endif
 #if defined(CONFIG_RENDER_GX)
 void render_gx_register(struct renderer *renderer);

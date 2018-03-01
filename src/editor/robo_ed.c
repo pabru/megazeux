@@ -44,20 +44,11 @@
 #include "../error.h"
 
 #include "char_ed.h"
+#include "clipboard.h"
 #include "edit.h"
 #include "param.h"
 #include "robo_ed.h"
 #include "window.h"
-
-#ifndef __WIN32__
-#include <limits.h>
-#endif
-
-#if defined(CONFIG_X11) && defined(CONFIG_SDL)
-#include "SDL.h"
-#include "SDL_syswm.h"
-#include "render_sdl.h"
-#endif
 
 #define combine_colors(a, b)  \
   (a) | (b << 4)              \
@@ -109,20 +100,17 @@ static const char bottom_line_connect = 193;
 static const char vertical_line = 179;
 static const char horizontal_line = 196;
 static const char top_char = 219;
-static const char bottom_char = 219;
 static const char bg_char = 32;
 static const char bg_color = 8;
 static const char bg_color_solid = combine_colors(0, 8);
 static const char top_color = 4;
-static const char bottom_color = 1;
 static const char line_color = combine_colors(15, 8);
 static const char top_text_color = combine_colors(15, 4);
 static const char bottom_text_color = combine_colors(15, 1);
 static const char top_highlight_color = combine_colors(14, 4);
-static const char current_line_color = combine_colors(11, 8);
 static const char mark_color = combine_colors(0, 7);
 
-static const int max_size = 65535;
+static const int max_size = 2097152;
 
 static int case_option = 0;
 
@@ -1216,387 +1204,23 @@ static int block_menu(struct world *mzx_world)
     construct_button(15, 7, "Cancel", -1)
   };
 
+  // Prevent previous keys from carrying through.
+  force_release_all_keys();
+
   construct_dialog(&di, "Choose Block Command", 26, 6, 28, 10,
    elements, 3, 0);
 
   dialog_result = run_dialog(mzx_world, &di);
   destruct_dialog(&di);
 
+  // Prevent UI keys from carrying through.
+  force_release_all_keys();
+
   if(dialog_result == -1)
     return -1;
   else
     return block_op;
 }
-
-#ifdef __WIN32__
-
-static void copy_buffer_to_selection(void)
-{
-  HANDLE global_memory;
-  size_t line_length;
-  char *dest_data;
-  char *dest_ptr;
-  int i;
-
-  // Room for \r's
-  copy_buffer_total_length += copy_buffer_lines - 1;
-
-  global_memory = GlobalAlloc(GMEM_MOVEABLE | GMEM_DDESHARE,
-    copy_buffer_total_length);
-  if(!global_memory)
-    return;
-
-  if(!OpenClipboard(NULL))
-    return;
-
-  dest_data = (char *)GlobalLock(global_memory);
-  dest_ptr = dest_data;
-
-  for(i = 0; i < copy_buffer_lines - 1; i++)
-  {
-    line_length = strlen(copy_buffer[i]);
-    memcpy(dest_ptr, copy_buffer[i], line_length);
-    dest_ptr += line_length;
-    dest_ptr[0] = '\r';
-    dest_ptr[1] = '\n';
-    dest_ptr += 2;
-  }
-
-  line_length = strlen(copy_buffer[i]);
-  memcpy(dest_ptr, copy_buffer[i], line_length);
-  dest_ptr[line_length] = 0;
-
-  GlobalUnlock(global_memory);
-  EmptyClipboard();
-  SetClipboardData(CF_TEXT, global_memory);
-
-  CloseClipboard();
-}
-
-static bool copy_selection_to_buffer(struct robot_state *rstate)
-{
-  char line_buffer[COMMAND_BUFFER_LEN];
-  char *src_data, *src_ptr;
-  HANDLE global_memory;
-  int line_length;
-
-  if(!IsClipboardFormatAvailable(CF_TEXT) || !OpenClipboard(NULL))
-    return FALSE;
-
-  rstate->command_buffer = line_buffer;
-
-  global_memory = GetClipboardData(CF_TEXT);
-  if(global_memory != NULL )
-  {
-    src_data = (char *)GlobalLock(global_memory);
-    src_ptr = src_data;
-
-    while(*src_ptr)
-    {
-      line_length = (int)strcspn(src_ptr, "\r");
-      memcpy(line_buffer, src_ptr, line_length);
-      line_buffer[line_length] = 0;
-      add_line(rstate, -1);
-      src_ptr += line_length;
-      if(*src_ptr)
-        src_ptr += 2;
-    }
-
-    GlobalUnlock(global_memory);
-    CloseClipboard();
-  }
-
-  rstate->command_buffer = rstate->command_buffer_space;
-  return TRUE;
-}
-
-#elif defined(CONFIG_X11) && defined(CONFIG_SDL)
-
-#if SDL_VERSION_ATLEAST(2,0,0)
-static int copy_buffer_to_X11_selection(void *userdata, SDL_Event *event)
-#else
-static int copy_buffer_to_X11_selection(const SDL_Event *event)
-#endif
-{
-  XSelectionRequestEvent *request;
-#if SDL_VERSION_ATLEAST(2,0,0)
-  SDL_Window *window = userdata;
-#else
-  SDL_Window *window = NULL;
-#endif
-  char *dest_data, *dest_ptr;
-  XEvent response, *xevent;
-  SDL_SysWMinfo info;
-  int i, line_length;
-  Display *display;
-
-  if(event->type != SDL_SYSWMEVENT)
-    return 1;
-
-  xevent = SDL_SysWMmsg_GetXEvent(event->syswm.msg);
-  if(xevent->type != SelectionRequest || !copy_buffer)
-    return 0;
-
-  SDL_VERSION(&info.version);
-  SDL_GetWindowWMInfo(window, &info);
-
-  display = info.info.x11.display;
-  dest_data = cmalloc(copy_buffer_total_length + 1);
-  dest_ptr = dest_data;
-
-  for(i = 0; i < copy_buffer_lines - 1; i++)
-  {
-    line_length = strlen(copy_buffer[i]);
-    memcpy(dest_ptr, copy_buffer[i], line_length);
-    dest_ptr += line_length;
-    dest_ptr[0] = '\n';
-    dest_ptr++;
-  }
-
-  line_length = strlen(copy_buffer[i]);
-  memcpy(dest_ptr, copy_buffer[i], line_length);
-  dest_ptr[line_length] = 0;
-
-  request = &(SDL_SysWMmsg_GetXEvent(event->syswm.msg)->xselectionrequest);
-  response.xselection.type = SelectionNotify;
-  response.xselection.display = request->display;
-  response.xselection.selection = request->selection;
-  response.xselection.target = XA_STRING;
-  response.xselection.property = request->property;
-  response.xselection.requestor = request->requestor;
-  response.xselection.time = request->time;
-
-  XChangeProperty(display, request->requestor, request->property,
-    XA_STRING, 8, PropModeReplace, (const unsigned char *)dest_data,
-    copy_buffer_total_length);
-
-  free(dest_data);
-
-  XSendEvent(display, request->requestor, True, 0, &response);
-  XFlush(display);
-  return 0;
-}
-
-static void copy_buffer_to_selection(void)
-{
-  SDL_Window *window = SDL_GetWindowFromID(sdl_window_id);
-  SDL_SysWMinfo info;
-
-  SDL_VERSION(&info.version);
-
-  if(!SDL_GetWindowWMInfo(window, &info) || (info.subsystem != SDL_SYSWM_X11))
-    return;
-
-  XSetSelectionOwner(info.info.x11.display, XA_PRIMARY,
-    info.info.x11.window, CurrentTime);
-
-  SDL_EventState(SDL_SYSWMEVENT, SDL_ENABLE);
-  SDL_SetEventFilter(copy_buffer_to_X11_selection, window);
-}
-
-static bool copy_selection_to_buffer(struct robot_state *rstate)
-{
-  SDL_Window *window = SDL_GetWindowFromID(sdl_window_id);
-  int selection_format, line_length, ret_type;
-  char line_buffer[COMMAND_BUFFER_LEN];
-  unsigned long int nbytes, overflow;
-  unsigned char *src_data, *src_ptr;
-  Window xwindow, owner;
-  Atom selection_type;
-  SDL_SysWMinfo info;
-  Display *display;
-  bool ret = false;
-
-  SDL_VERSION(&info.version);
-
-  if(!SDL_GetWindowWMInfo(window, &info) || (info.subsystem != SDL_SYSWM_X11))
-    return ret;
-
-  display = info.info.x11.display;
-  xwindow = info.info.x11.window;
-  owner = XGetSelectionOwner(display, XA_PRIMARY);
-
-  if((owner == None) || (owner == xwindow))
-    return ret;
-
-  XConvertSelection(display, XA_PRIMARY, XA_STRING, None,
-    owner, CurrentTime);
-
-  XLockDisplay(display);
-
-  ret_type =
-    XGetWindowProperty(display, owner,
-    XA_STRING, 0, INT_MAX / 4, False, AnyPropertyType, &selection_type,
-    &selection_format, &nbytes, &overflow, &src_data);
-
-  if((ret_type != Success) || ((selection_type != XA_STRING) &&
-    (selection_type != XInternAtom(display, "TEXT", False)) &&
-    (selection_type != XInternAtom(display, "COMPOUND_TEXT", False)) &&
-    (selection_type != XInternAtom(display, "UTF8_STRING", False))))
-    goto err_unlock;
-
-  rstate->command_buffer = line_buffer;
-  src_ptr = src_data;
-
-  while(*src_ptr)
-  {
-    line_length = strcspn((const char *)src_ptr, "\n");
-    memcpy(line_buffer, src_ptr, line_length);
-    line_buffer[line_length] = 0;
-    add_line(rstate, -1);
-    src_ptr += line_length;
-    if(*src_ptr)
-      src_ptr++;
-  }
-
-  XFree(src_data);
-  rstate->command_buffer = rstate->command_buffer_space;
-  ret = true;
-
-err_unlock:
-  XUnlockDisplay(display);
-  return ret;
-}
-
-#elif defined(SDL_VIDEO_DRIVER_QUARTZ)
-
-#define decimal decimal_
-#define Random Random_
-#include <Carbon/Carbon.h>
-
-static const CFStringRef PLAIN = CFSTR("com.apple.traditional-mac-plain-text");
-
-static void copy_buffer_to_selection(void)
-{
-  PasteboardSyncFlags syncFlags;
-  char *dest_data, *dest_ptr;
-  PasteboardRef clipboard;
-  CFDataRef textData;
-  int i, line_length;
-
-  if(PasteboardCreate(kPasteboardClipboard, &clipboard) != noErr)
-    return;
-
-  if(PasteboardClear(clipboard) != noErr)
-    goto err_release;
-
-  syncFlags = PasteboardSynchronize(clipboard);
-  if((syncFlags & kPasteboardModified) ||
-    !(syncFlags & kPasteboardClientIsOwner))
-    goto err_release;
-
-  dest_data = cmalloc(copy_buffer_total_length + 1);
-  dest_ptr = dest_data;
-
-  for(i = 0; i < copy_buffer_lines - 1; i++)
-  {
-    line_length = strlen(copy_buffer[i]);
-    memcpy(dest_ptr, copy_buffer[i], line_length);
-    dest_ptr += line_length;
-    dest_ptr[0] = '\n';
-    dest_ptr++;
-  }
-
-  line_length = strlen(copy_buffer[i]);
-  memcpy(dest_ptr, copy_buffer[i], line_length);
-  dest_ptr[line_length] = 0;
-
-  textData = CFDataCreate(kCFAllocatorDefault,
-   (const UInt8 *)dest_data, copy_buffer_total_length + 1);
-  free(dest_data);
-
-  if(!textData)
-    goto err_release;
-
-  if(PasteboardPutItemFlavor(clipboard, (PasteboardItemID)1,
-   PLAIN, textData, 0) != noErr)
-    goto err_release;
-
-err_release:
-  CFRelease(clipboard);
-}
-
-static bool copy_selection_to_buffer(struct robot_state *rstate)
-{
-  PasteboardRef clipboard;
-  ItemCount itemCount;
-  UInt32 itemIndex;
-  bool ret = false;
-
-  if(PasteboardCreate(kPasteboardClipboard, &clipboard) != noErr)
-    return false;
-
-  if(PasteboardGetItemCount(clipboard, &itemCount) != noErr)
-    goto err_release;
-
-  for(itemIndex = 1; itemIndex <= itemCount; itemIndex++)
-  {
-    CFIndex flavorCount, flavorIndex;
-    CFArrayRef flavorTypeArray;
-    PasteboardItemID itemID;
-
-    if(PasteboardGetItemIdentifier(clipboard, itemIndex, &itemID) != noErr)
-      goto err_release;
-
-    if(PasteboardCopyItemFlavors(clipboard, itemID, &flavorTypeArray) != noErr)
-      goto err_release;
-
-    flavorCount = CFArrayGetCount(flavorTypeArray);
-
-    for(flavorIndex = 0; flavorIndex < flavorCount; flavorIndex++)
-    {
-      char line_buffer[COMMAND_BUFFER_LEN];
-      char *src_data, *src_ptr;
-      CFDataRef flavorData;
-      int line_length;
-
-      CFStringRef flavorType =
-       (CFStringRef)CFArrayGetValueAtIndex(flavorTypeArray, flavorIndex);
-
-      if(!UTTypeConformsTo(flavorType, PLAIN))
-        continue;
-
-      if(PasteboardCopyItemFlavorData(clipboard, itemID,
-       flavorType, &flavorData) != noErr)
-        continue;
-
-      rstate->command_buffer = line_buffer;
-
-      src_data = (char *)CFDataGetBytePtr(flavorData);
-      src_ptr = src_data;
-
-      while(*src_ptr)
-      {
-        line_length = strcspn((const char *)src_ptr, "\n");
-        memcpy(line_buffer, src_ptr, line_length);
-        line_buffer[line_length] = 0;
-        add_line(rstate, -1);
-        src_ptr += line_length;
-        if(*src_ptr)
-          src_ptr++;
-      }
-
-      rstate->command_buffer = rstate->command_buffer_space;
-      CFRelease(flavorData);
-      ret = true;
-    }
-  }
-
-err_release:
-  CFRelease(clipboard);
-  return ret;
-}
-
-#else // !__WIN32__ && !(CONFIG_X11 && CONFIG_SDL) && !SDL_VIDEO_DRIVER_QUARTZ
-
-static inline void copy_buffer_to_selection(void) {}
-
-static inline bool copy_selection_to_buffer(struct robot_state *rstate)
-{
-  return false;
-}
-
-#endif
 
 static void copy_block_to_buffer(struct robot_state *rstate)
 {
@@ -1633,7 +1257,65 @@ static void copy_block_to_buffer(struct robot_state *rstate)
   /* It may be possible to copy this buffer out of process,
    * to an operating system clipboard.
    */
-  copy_buffer_to_selection();
+  copy_buffer_to_clipboard(copy_buffer, copy_buffer_lines,
+   copy_buffer_total_length);
+}
+
+static void paste_buffer(struct robot_state *rstate)
+{
+  char *ext_buffer = get_clipboard_buffer();
+  int i;
+
+  // If we can use an OS buffer, do so
+  if(ext_buffer)
+  {
+    char line_buffer[COMMAND_BUFFER_LEN];
+    char *src_ptr;
+    int line_length;
+    int copy_length;
+
+    rstate->command_buffer = line_buffer;
+    src_ptr = ext_buffer;
+
+    while(*src_ptr)
+    {
+      line_length = (int)strcspn(src_ptr, "\r\n");
+
+      copy_length = line_length;
+      if(copy_length >= COMMAND_BUFFER_LEN)
+        copy_length = COMMAND_BUFFER_LEN - 1;
+
+      memcpy(line_buffer, src_ptr, copy_length);
+      line_buffer[copy_length] = 0;
+      add_line(rstate, -1);
+      src_ptr += line_length;
+
+#ifdef __WIN32__
+      if(*src_ptr == '\r')
+        src_ptr++;
+
+      if(*src_ptr == '\n')
+        src_ptr++;
+#else
+      if(*src_ptr)
+        src_ptr++;
+#endif
+    }
+
+    free(ext_buffer);
+  }
+  else
+
+  if(copy_buffer)
+  {
+    for(i = 0; i < copy_buffer_lines; i++)
+    {
+      rstate->command_buffer = copy_buffer[i];
+      add_line(rstate, -1);
+    }
+  }
+
+  rstate->command_buffer = rstate->command_buffer_space;
 }
 
 static void clear_block(struct robot_state *rstate)
@@ -1748,7 +1430,7 @@ static void export_block(struct robot_state *rstate, int region_default)
 
   export_name[0] = 0;
 
-  if(!file_manager(mzx_world, export_ext, ".txt", export_name,
+  if(!file_manager(mzx_world, export_ext, NULL, export_name,
    "Export robot", 1, 1, elements, num_elements, 3))
   {
     FILE *export_file;
@@ -1809,10 +1491,23 @@ static void import_block(struct world *mzx_world, struct robot_state *rstate)
   ssize_t ext_pos;
 
   txt_ext[1] = ".BC";
-#endif
 
   if(choose_file(mzx_world, txt_ext, import_name, "Import Robot", 1))
     return;
+
+#else // CONFIG_DEBYTECODE
+  const char *label[] = { "Legacy source code" };
+  int is_legacy = 0;
+
+  struct element *elements[] = {
+    construct_check_box(21, 20, label, 1, strlen(label[0]), &is_legacy)
+  };
+
+  if(file_manager(mzx_world, txt_ext, NULL, import_name, "Import Robot", 1,
+   0, elements, 1, 2))
+    return;
+
+#endif
 
   import_file = fopen_unsafe(import_name, "rb");
 
@@ -1863,8 +1558,37 @@ static void import_block(struct world *mzx_world, struct robot_state *rstate)
        free(buffer);
     }
   }
+
+#else //CONFIG_DEBYTECODE
+  if(is_legacy)
+  {
+    char command_buffer[512];
+    char bytecode_buffer[256];
+    char errors[256];
+
+    int disasm_length;
+
+    rstate->command_buffer = command_buffer;
+
+    while(fsafegets(line_buffer, 256, import_file) != NULL)
+    {
+      legacy_assemble_line(line_buffer, bytecode_buffer, errors,
+       NULL, NULL);
+
+      legacy_disassemble_command(bytecode_buffer, command_buffer,
+       &disasm_length, 256,
+       mzx_world->conf.disassemble_extras,
+       mzx_world->conf.disassemble_base
+      );
+
+      command_buffer[disasm_length] = 0;
+
+      add_line(rstate,-1);
+    }
+  }
+
+#endif //CONFIG_DEBYTECODE
   else
-#endif
   {
     // fsafegets ensures that no line terminators are present
     while(fsafegets(line_buffer, 255, import_file) != NULL)
@@ -1894,6 +1618,9 @@ static void edit_settings(struct world *mzx_world)
   };
   char new_macros[5][64];
 
+  // Prevent previous keys from carrying through.
+  force_release_all_keys();
+
   memcpy(new_macros, macros, 64 * 5);
 
   construct_dialog(&di, "Edit Settings", 10, 6, 60, 12,
@@ -1901,6 +1628,9 @@ static void edit_settings(struct world *mzx_world)
 
   dialog_result = run_dialog(mzx_world, &di);
   destruct_dialog(&di);
+
+  // Prevent UI keys from carrying through.
+  force_release_all_keys();
 
   if(dialog_result)
     memcpy(macros, new_macros, 64 * 5);
@@ -2032,6 +1762,9 @@ static void goto_position(struct world *mzx_world, struct robot_state *rstate)
     construct_button(14, 5, "Cancel", -1)
   };
 
+  // Prevent previous keys from carrying through.
+  force_release_all_keys();
+
   construct_dialog(&di, "Goto position", 28, 8, 25, 7,
    elements, 4, 0);
 
@@ -2043,6 +1776,9 @@ static void goto_position(struct world *mzx_world, struct robot_state *rstate)
     rstate->current_x = column_number;
     goto_line(rstate, line_number);
   }
+
+  // Prevent UI keys from carrying through.
+  force_release_all_keys();
 }
 
 static void replace_current_line(struct robot_state *rstate,
@@ -2174,11 +1910,17 @@ static void find_replace_action(struct robot_state *rstate)
     construct_button(44, 7, "Cancel", -1)
   };
 
+  // Prevent previous keys from carrying through.
+  force_release_all_keys();
+
   construct_dialog(&di, "Search and Replace", 10, 7, 70, 10,
    elements, 8, 0);
 
   last_find_option = run_dialog(rstate->mzx_world, &di);
   destruct_dialog(&di);
+
+  // Prevent UI keys from carrying through.
+  force_release_all_keys();
 
   wrap_option = check_result_1[0];
   case_option = check_result_2[0];
@@ -2569,9 +2311,15 @@ static void execute_macro(struct robot_state *rstate,
    start_y, nominal_width, nominal_height, elements,
    total_dialog_elements, 0, 1, 2, NULL);
 
+  // Prevent previous keys from carrying through.
+  force_release_all_keys();
+
   do
   {
     dialog_value = run_dialog(mzx_world, &di);
+
+    // Prevent UI keys from carrying through.
+    force_release_all_keys();
 
     switch(dialog_value)
     {
@@ -2860,7 +2608,7 @@ static void display_robot_line(struct robot_state *rstate,
         else
         {
           arg_length = strcspn(line_pos, " ") + 1;
-          chars_offset = 256;
+          chars_offset = PRO_CH;
         }
 
         if((current_arg == S_COLOR) && (color_codes[current_arg + 1] == 255))
@@ -2956,7 +2704,11 @@ static int validate_lines(struct robot_state *rstate, int show_none)
   int dialog_result;
   int num_ignore = 0;
   int current_size = rstate->size;
+  int current_element = 4;
   int i;
+
+  // Prevent previous keys from carrying through.
+  force_release_all_keys();
 
   // First, collect the number of errors, and process error messages
   // by calling assemble_line.
@@ -3087,16 +2839,21 @@ static int validate_lines(struct robot_state *rstate, int show_none)
         }
       }
 
+      if(current_element >= element_pos)
+        current_element = 1;
+
       construct_dialog(&di, "Command Summary", 5, 2, 70, 21,
-       elements, element_pos, 1);
+       elements, element_pos, current_element);
 
       dialog_result = run_dialog(mzx_world, &di);
+      current_element = di.current_element;
       destruct_dialog(&di);
 
       if(dialog_result == -1)
       {
         // Cancel - bails
         redo = 0;
+        break;
       }
       else
 
@@ -3121,6 +2878,7 @@ static int validate_lines(struct robot_state *rstate, int show_none)
         }
 
         rstate->size = current_size;
+        continue;
       }
       else
 
@@ -3174,15 +2932,36 @@ static int validate_lines(struct robot_state *rstate, int show_none)
       if(dialog_result == 1)
       {
         start_line -= 12;
+        current_element = 4;
+        continue;
       }
       else
 
       if(dialog_result == 2)
       {
         start_line += 12;
+        current_element = 4;
+        continue;
       }
+
+      // Next issue
+      current_element += 4;
+      if(current_element >= element_pos)
+      {
+        // Next
+        if(num_errors - start_line > 12)
+          current_element = element_pos - 1;
+
+        // Okay
+        else
+          current_element = 1;
+      }
+
     } while(redo);
   }
+
+  // Prevent UI keys from carrying through.
+  force_release_all_keys();
 
   update_current_line(rstate);
   return num_ignore;
@@ -3190,28 +2969,9 @@ static int validate_lines(struct robot_state *rstate, int show_none)
 
 #endif /* !CONFIG_DEBYTECODE */
 
-static void paste_buffer(struct robot_state *rstate)
-{
-  int i;
-
-  // If we can use an OS buffer instead, do so
-  if(copy_selection_to_buffer(rstate))
-    return;
-
-  if(copy_buffer)
-  {
-    for(i = 0; i < copy_buffer_lines; i++)
-    {
-      rstate->command_buffer = copy_buffer[i];
-      add_line(rstate, -1);
-    }
-  }
-
-  rstate->command_buffer = rstate->command_buffer_space;
-}
-
 void robot_editor(struct world *mzx_world, struct robot *cur_robot)
 {
+  int exit;
   int key;
   int i;
   int mouse_press;
@@ -3239,12 +2999,15 @@ void robot_editor(struct world *mzx_world, struct robot *cur_robot)
   char arg_types[32], *next;
 #endif
 
-  set_caption(mzx_world, mzx_world->current_board, cur_robot, 1);
+  // Prevent previous keys from carrying through.
+  force_release_all_keys();
+
+  set_caption(mzx_world, mzx_world->current_board, cur_robot, 1, 1);
 
   rstate.current_line = 0;
   rstate.current_rline = &base;
   rstate.total_lines = 0;
-  rstate.max_size = 65535;
+  rstate.max_size = max_size;
   rstate.include_ignores = mzx_world->conf.disassemble_extras;
   rstate.disassemble_base = mzx_world->conf.disassemble_base;
   rstate.ccodes = mzx_world->editor_conf.color_codes;
@@ -3385,7 +3148,7 @@ void robot_editor(struct world *mzx_world, struct robot *cur_robot)
     rstate.scr_line_end = 20;
   }
 
-  sprintf(max_size_buffer, "%05d", rstate.max_size);
+  sprintf(max_size_buffer, "%07d", rstate.max_size);
   strcpy(rstate.command_buffer, rstate.current_rline->line_text);
 
   do
@@ -3433,14 +3196,14 @@ void robot_editor(struct world *mzx_world, struct robot *cur_robot)
     snprintf(str_buffer, 32, "%05d", rstate.total_lines);
     str_buffer[31] = 0;
     write_string(str_buffer, 14, 0, top_text_color, 0);
-    write_string("Character:", 21, 0, top_highlight_color, 0);
-    write_string("/", 35, 0, top_highlight_color, 0);
-    write_string("Size:", 41, 0, top_highlight_color, 0);
-    snprintf(str_buffer, 32, "%05d", rstate.size);
+    write_string("Char.:", 21, 0, top_highlight_color, 0);
+    write_string("/", 31, 0, top_highlight_color, 0);
+    write_string("Size:", 37, 0, top_highlight_color, 0);
+    snprintf(str_buffer, 32, "%07d", rstate.size);
     str_buffer[31] = 0;
-    write_string(str_buffer, 47, 0, top_text_color, 0);
-    write_string("/", 52, 0, top_highlight_color, 0);
-    write_string(max_size_buffer, 53, 0, top_text_color, 0);
+    write_string(str_buffer, 43, 0, top_text_color, 0);
+    write_string("/", 50, 0, top_highlight_color, 0);
+    write_string(max_size_buffer, 51, 0, top_text_color, 0);
     write_string("X:", 60, 0, top_highlight_color, 0);
     snprintf(str_buffer, 32, "%05d", cur_robot->xpos);
     str_buffer[31] = 0;
@@ -3595,6 +3358,11 @@ void robot_editor(struct world *mzx_world, struct robot *cur_robot)
 
     rstate.active_macro = NULL;
     rstate.macro_recurse_level = 0;
+
+    // Exit event - ignore other input
+    exit = get_exit_status();
+    if(exit)
+      key = 0;
 
     switch(key)
     {
@@ -3752,6 +3520,10 @@ void robot_editor(struct world *mzx_world, struct robot *cur_robot)
       case IKEY_F4:
       {
         int thing_index, end_x, start_x = rstate.current_x;
+
+        // ALT+F4 - do nothing.
+        if(get_alt_status(keycode_internal))
+          break;
 
         if(!rstate.command_buffer[start_x])
           start_x--;
@@ -3987,25 +3759,7 @@ void robot_editor(struct world *mzx_world, struct robot *cur_robot)
 
       case IKEY_ESCAPE:
       {
-        update_current_line(&rstate);
-
-#ifdef CONFIG_DEBYTECODE
-        if(rstate.confirm_changes)
-        {
-          char confirm_prompt[80] = "Program modified. Save changes?";
-          int confirm_changes_res = ask_yes_no(mzx_world, confirm_prompt);
-
-          if(confirm_changes_res < 0)
-            key = 0;
-
-          if(!confirm_changes_res)
-            cur_robot->program_source = package_program(rstate.base->next,
-             NULL, &(cur_robot->program_source_length), cur_robot->program_source);
-
-        }
-#endif
-        if(validate_lines(&rstate, 0))
-          key = 0;
+        exit = 1;
         break;
       }
 
@@ -4257,7 +4011,7 @@ void robot_editor(struct world *mzx_world, struct robot *cur_robot)
           write_string("Configure macro:", 17, 12, DI_DEBUG_LABEL, 0);
 
           if(intake(mzx_world, macro_line, 29, 34, 12, 15, 1, 0, NULL,
-           0, NULL) != IKEY_ESCAPE)
+           0, NULL) != IKEY_ESCAPE && !get_exit_status())
           {
             struct ext_macro *macro_src;
             int next;
@@ -4276,7 +4030,34 @@ void robot_editor(struct world *mzx_world, struct robot *cur_robot)
         break;
       }
     }
-  } while(key != IKEY_ESCAPE);
+
+    if(exit)
+    {
+      update_current_line(&rstate);
+
+#ifdef CONFIG_DEBYTECODE
+      if(rstate.confirm_changes)
+      {
+        char confirm_prompt[80] = "Program modified. Save changes?";
+        int confirm_changes_res = ask_yes_no(mzx_world, confirm_prompt);
+
+        if(confirm_changes_res < 0)
+          exit = 0;
+
+        if(!confirm_changes_res)
+          cur_robot->program_source = package_program(rstate.base->next,
+           NULL, &(cur_robot->program_source_length), cur_robot->program_source);
+
+      }
+#endif
+      if(validate_lines(&rstate, 0))
+        exit = 0;
+    }
+
+  } while(!exit);
+
+  // Prevent UI keys from carrying through.
+  force_release_all_keys();
 
 #ifndef CONFIG_DEBYTECODE
   // Package time

@@ -2,7 +2,7 @@
  *
  * Copyright (C) 1996 Greg Janson
  * Copyright (C) 2004 Gilead Kutnick <exophase@adelphia.net>
- * Copyright (C) 2012 Alice Lauren Rowan <petrifiedrowan@gmail.com>
+ * Copyright (C) 2017 Alice Rowan <petrifiedrowan@gmail.com>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
@@ -24,35 +24,40 @@
 #include <time.h>
 #include <string.h>
 
-#include "error.h"
-#include "intake.h"
-#include "graphics.h"
-#include "scrdisp.h"
-#include "window.h"
-#include "sfx.h"
 #include "audio.h"
-#include "idarray.h"
-#include "idput.h"
+#include "block.h"
 #include "const.h"
-#include "data.h"
 #include "counter.h"
+#include "data.h"
+#include "error.h"
+#include "event.h"
+#include "extmem.h"
+#include "fsafeopen.h"
 #include "game.h"
 #include "game2.h"
-#include "counter.h"
+#include "graphics.h"
+#include "idarray.h"
+#include "idput.h"
+#include "intake.h"
 #include "mzm.h"
-#include "sprite.h"
-#include "event.h"
 #include "robot.h"
-#include "world.h"
-#include "fsafeopen.h"
-#include "extmem.h"
+#include "scrdisp.h"
+#include "sfx.h"
+#include "sprite.h"
+#include "str.h"
 #include "util.h"
+#include "window.h"
+#include "world.h"
 
 #define parsedir(a, b, c, d) \
  parsedir(mzx_world, a, b, c, d, _bl[0], _bl[1], _bl[2], _bl[3])
 
-__editor_maybe_static
-int (*debug_robot)(struct world *mzx_world, struct robot *cur_robot, int id);
+#ifdef CONFIG_EDITOR
+int (*debug_robot_break)(struct world *mzx_world, struct robot *cur_robot,
+ int id, int lines_run);
+int (*debug_robot_watch)(struct world *mzx_world, struct robot *cur_robot,
+ int id, int lines_run);
+#endif
 
 static const char *const item_to_counter[9] =
 {
@@ -83,31 +88,63 @@ __editor_maybe_static const int def_params[128] =
 static void magic_load_mod(struct world *mzx_world, char *filename)
 {
   struct board *src_board = mzx_world->current_board;
-  size_t mod_name_size = strlen(filename);
-  int change_real_mod = 0;
+  char translated_name[MAX_PATH];
+  int mod_star = 0;
+  int n_result;
 
-  if((mod_name_size > 1) && (filename[mod_name_size - 1] == '*'))
+  size_t mod_name_size;
+
+  // Special case: mod "" ends the module.
+  if(!filename[0])
+  {
+    mzx_world->real_mod_playing[0] = 0;
+    end_module();
+    return;
+  }
+
+  // Temporarily remove *
+  mod_name_size = strlen(filename);
+  if(mod_name_size && filename[mod_name_size - 1] == '*')
   {
     filename[mod_name_size - 1] = 0;
+    mod_star = 1;
+  }
 
-    if(strcasecmp(src_board->mod_playing, filename))
+  // Get the translated name (the one we want to compare against now)
+  n_result = fsafetranslate(filename, translated_name);
+
+  // Add * back
+  if(mod_star)
+    filename[mod_name_size - 1] = '*';
+
+  if(n_result == FSAFE_SUCCESS)
+  {
+    // filename*
+    if(mod_star)
     {
-      strcpy(src_board->mod_playing, filename);
-      change_real_mod = load_board_module(src_board);
+      // Different names? Play the mod
+      if(strcasecmp(translated_name, mzx_world->real_mod_playing))
+      {
+        // This will update real_mod_playing
+        strcpy(src_board->mod_playing, translated_name);
+        load_board_module(mzx_world, src_board);
+      }
+
+      strcpy(src_board->mod_playing, "*");
     }
 
+    // filename
+    else
+    {
+      // This will update real_mod_playing
+      strcpy(src_board->mod_playing, translated_name);
+      load_board_module(mzx_world, src_board);
+    }
+  }
+
+  // *
+  if (filename[0] == '*')
     strcpy(src_board->mod_playing, "*");
-  }
-  else
-  {
-    strcpy(src_board->mod_playing, filename);
-
-    if(filename[0] != '*')
-      change_real_mod = load_board_module(src_board);
-  }
-
-  if(change_real_mod && filename[0] != '*')
-    strcpy(mzx_world->real_mod_playing, filename);
 }
 
 static void save_player_position(struct world *mzx_world, int pos)
@@ -163,7 +200,7 @@ int place_at_xy(struct world *mzx_world, enum thing id, int color, int param,
   struct board *src_board = mzx_world->current_board;
   int board_width = src_board->board_width;
   int offset = x + (y * board_width);
-  enum thing new_id = (enum thing)src_board->level_id[offset];
+  enum thing old_id = (enum thing)src_board->level_id[offset];
 
   // Okay, I'm really stabbing at behavior here.
   // Wildcard param, use source but only if id matches and isn't
@@ -172,7 +209,7 @@ int place_at_xy(struct world *mzx_world, enum thing id, int color, int param,
   {
     // The param must represent the char for this to happen,
     // nothing else will give.
-    if((id_chars[new_id] != 255)  || (id_chars[id] != 255))
+    if((id_chars[old_id] != 255) || (id_chars[id] != 255))
     {
       if(def_params[id] > 0)
         param = def_params[id];
@@ -185,28 +222,32 @@ int place_at_xy(struct world *mzx_world, enum thing id, int color, int param,
     }
   }
 
-  if(new_id == SENSOR)
+  if(old_id == SENSOR)
   {
-    int new_param = src_board->level_param[offset];
-    clear_sensor_id(src_board, new_param);
+    // Okay to put player on sensor; it won't destroy the sensor
+    if(id != PLAYER)
+    {
+      int old_param = src_board->level_param[offset];
+      clear_sensor_id(src_board, old_param);
+    }
   }
   else
 
-  if(is_signscroll(new_id))
+  if(is_signscroll(old_id))
   {
-    int new_param = src_board->level_param[offset];
-    clear_scroll_id(src_board, new_param);
+    int old_param = src_board->level_param[offset];
+    clear_scroll_id(src_board, old_param);
   }
   else
 
-  if(is_robot(new_id))
+  if(is_robot(old_id))
   {
-    int new_param = src_board->level_param[offset];
-    clear_robot_id(src_board, new_param);
+    int old_param = src_board->level_param[offset];
+    clear_robot_id(src_board, old_param);
   }
   else
 
-  if(new_id == PLAYER)
+  if(old_id == PLAYER)
   {
     return 0; // Don't allow the player to be overwritten
   }
@@ -507,8 +548,8 @@ static void copy_xy_to_xy(struct world *mzx_world, int src_x, int src_y,
     if(is_robot(src_id))
     {
       struct robot *src_robot = src_board->robot_list[src_param];
-      src_param = duplicate_robot(src_board, src_robot,
-       dest_x, dest_y);
+      src_param = duplicate_robot(mzx_world, src_board, src_robot,
+       dest_x, dest_y, 1);
     }
     else
 
@@ -532,281 +573,6 @@ static void copy_xy_to_xy(struct world *mzx_world, int src_x, int src_y,
     {
       place_at_xy(mzx_world, src_id,
        src_board->level_color[src_offset], src_param, dest_x, dest_y);
-    }
-  }
-}
-
-__editor_maybe_static void copy_board_to_board_buffer(struct board *src_board,
- int x, int y, int width, int height, char *dest_id, char *dest_param,
- char *dest_color, char *dest_under_id, char *dest_under_param,
- char *dest_under_color, struct board *dest_board)
-{
-  int board_width = src_board->board_width;
-  int src_offset = x + (y * board_width);
-  int src_skip = board_width - width;
-  int dest_offset = 0;
-  char *level_id = src_board->level_id;
-  char *level_param = src_board->level_param;
-  char *level_color = src_board->level_color;
-  char *level_under_id = src_board->level_under_id;
-  char *level_under_param = src_board->level_under_param;
-  char *level_under_color = src_board->level_under_color;
-  enum thing src_id;
-  int src_param;
-  int i, i2;
-
-  for(i = 0; i < height; i++, src_offset += src_skip)
-  {
-    for(i2 = 0; i2 < width; i2++, src_offset++,
-     dest_offset++)
-    {
-      src_id = (enum thing)level_id[src_offset];
-      src_param = level_param[src_offset];
-      if(is_robot(src_id))
-      {
-        struct robot *src_robot = src_board->robot_list[src_param];
-        src_param = duplicate_robot(dest_board, src_robot,
-         0, 0);
-      }
-      else
-
-      if(is_signscroll(src_id))
-      {
-        struct scroll *src_scroll = src_board->scroll_list[src_param];
-        src_param = duplicate_scroll(dest_board, src_scroll);
-      }
-      else
-
-      if(src_id == SENSOR)
-      {
-        struct sensor *src_sensor = src_board->sensor_list[src_param];
-        src_param = duplicate_sensor(dest_board, src_sensor);
-      }
-
-      // Now perform the copy to the buffer sections
-      if(src_param != -1)
-      {
-        dest_id[dest_offset] = src_id;
-        dest_param[dest_offset] = src_param;
-        dest_color[dest_offset] = level_color[src_offset];
-        dest_under_id[dest_offset] = level_under_id[src_offset];
-        dest_under_param[dest_offset] = level_under_param[src_offset];
-        dest_under_color[dest_offset] = level_under_color[src_offset];
-      }
-      else
-      {
-        dest_id[dest_offset] = level_under_id[src_offset];
-        dest_param[dest_offset] = level_under_param[src_offset];
-        dest_color[dest_offset] = level_under_color[src_offset];
-        dest_under_id[dest_offset] = level_under_id[src_offset];
-        dest_under_param[dest_offset] = level_under_param[src_offset];
-        dest_under_color[dest_offset] = level_under_color[src_offset];
-      }
-    }
-  }
-}
-
-__editor_maybe_static void copy_board_buffer_to_board(struct board *src_board,
- int x, int y, int width, int height, char *src_id, char *src_param,
- char *src_color, char *src_under_id, char *src_under_param,
- char *src_under_color)
-{
-  int board_width = src_board->board_width;
-  int dest_offset = x + (y * board_width);
-  int dest_skip = board_width - width;
-  int src_offset = 0;
-  char *level_id = src_board->level_id;
-  char *level_param = src_board->level_param;
-  char *level_color = src_board->level_color;
-  char *level_under_id = src_board->level_under_id;
-  char *level_under_param = src_board->level_under_param;
-  char *level_under_color = src_board->level_under_color;
-  enum thing src_id_cur, dest_id;
-  int dest_param;
-  int i, i2;
-
-  for(i = 0; i < height; i++, dest_offset += dest_skip)
-  {
-    for(i2 = 0; i2 < width; i2++, src_offset++, dest_offset++)
-    {
-      dest_id = (enum thing)level_id[dest_offset];
-      src_id_cur = (enum thing)src_id[src_offset];
-
-      if(dest_id != PLAYER)
-      {
-        dest_param = level_param[dest_offset];
-
-        if(dest_id == SENSOR)
-        {
-          clear_sensor_id(src_board, dest_param);
-        }
-        else
-
-        if(is_signscroll(dest_id))
-        {
-          clear_scroll_id(src_board, dest_param);
-        }
-        else
-
-        if(is_robot(dest_id))
-        {
-          clear_robot_id(src_board, dest_param);
-        }
-
-        if(is_robot(src_id_cur))
-        {
-          int idx = src_param[src_offset];
-          (src_board->robot_list[idx])->xpos = x + i2;
-          (src_board->robot_list[idx])->ypos = y + i;
-        }
-
-        if(src_id_cur != PLAYER)
-        {
-          level_id[dest_offset] = src_id_cur;
-          level_param[dest_offset] = src_param[src_offset];
-          level_color[dest_offset] = src_color[src_offset];
-          level_under_id[dest_offset] = src_under_id[src_offset];
-          level_under_param[dest_offset] = src_under_param[src_offset];
-          level_under_color[dest_offset] = src_under_color[src_offset];
-        }
-        else
-        {
-          level_id[dest_offset] = src_under_id[src_offset];
-          level_param[dest_offset] = src_under_param[src_offset];
-          level_color[dest_offset] = src_under_color[src_offset];
-        }
-      }
-    }
-  }
-}
-
-__editor_maybe_static void copy_layer_to_buffer(int x, int y,
- int width, int height, char *src_char, char *src_color,
- char *dest_char, char *dest_color, int layer_width)
-{
-  int src_offset = x + (y * layer_width);
-  int src_skip = layer_width - width;
-  int dest_offset = 0;
-  int i, i2;
-
-  for(i = 0; i < height; i++, src_offset += src_skip)
-  {
-    for(i2 = 0; i2 < width; i2++, src_offset++,
-     dest_offset++)
-    {
-      // Now perform the copy to the buffer sections
-      dest_char[dest_offset] = src_char[src_offset];
-      dest_color[dest_offset] = src_color[src_offset];
-    }
-  }
-}
-
-__editor_maybe_static void copy_buffer_to_layer(int x, int y,
- int width, int height, char *src_char, char *src_color,
- char *dest_char, char *dest_color, int layer_width)
-{
-  int dest_offset = x + (y * layer_width);
-  int dest_skip = layer_width - width;
-  int src_offset = 0;
-  int i, i2;
-
-  for(i = 0; i < height; i++, dest_offset += dest_skip)
-  {
-    for(i2 = 0; i2 < width; i2++, src_offset++,
-     dest_offset++)
-    {
-      // Now perform the copy to the buffer sections
-      dest_char[dest_offset] = src_char[src_offset];
-      dest_color[dest_offset] = src_color[src_offset];
-    }
-  }
-}
-
-static void copy_layer_to_layer(int src_x, int src_y, int dest_x, int dest_y,
- int width, int height, char *src_char, char *src_color, char *dest_char,
- char *dest_color, int src_width, int dest_width)
-{
-  int dest_offset = dest_x + (dest_y * dest_width);
-  int dest_skip = dest_width - width;
-  int src_offset = src_x + (src_y * src_width);
-  int src_skip = src_width - width;
-  int src_char_cur;
-  int i, i2;
-
-  for(i = 0; i < height; i++, dest_offset += dest_skip,
-   src_offset += src_skip)
-  {
-    for(i2 = 0; i2 < width; i2++, src_offset++,
-     dest_offset++)
-    {
-      src_char_cur = src_char[src_offset];
-      if(src_char_cur != 32)
-      {
-        // Now perform the copy, if src != 32
-        dest_char[dest_offset] = src_char_cur;
-        dest_color[dest_offset] = src_color[src_offset];
-      }
-    }
-  }
-}
-
-__editor_maybe_static void copy_board_to_layer(struct board *src_board,
- int x, int y, int width, int height,
- char *dest_char, char *dest_color, int dest_width)
-{
-  int board_width = src_board->board_width;
-  int src_offset = x + (y * board_width);
-  int src_skip = board_width - width;
-  int dest_skip = dest_width - width;
-  int dest_offset = 0;
-  int src_char;
-  int i, i2;
-
-  for(i = 0; i < height; i++, src_offset += src_skip,
-   dest_offset += dest_skip)
-  {
-    for(i2 = 0; i2 < width; i2++, src_offset++,
-     dest_offset++)
-    {
-      src_char = get_id_char(src_board, src_offset);
-      if(src_char != 32)
-      {
-        dest_char[dest_offset] = get_id_char(src_board, src_offset);
-        dest_color[dest_offset] = get_id_color(src_board, src_offset);
-      }
-    }
-  }
-}
-
-// Make sure convert ID is a custom_*, otherwise this could get ugly
-__editor_maybe_static void copy_layer_to_board(struct board *src_board,
- int x, int y, int width, int height, char *src_char, char *src_color,
- int src_width, enum thing convert_id)
-{
-  int board_width = src_board->board_width;
-  int dest_offset = x + (y * board_width);
-  int dest_skip = src_board->board_width - width;
-  int src_skip = src_width - width;
-  int src_offset = 0;
-  char *level_id = src_board->level_id;
-  char *level_param = src_board->level_param;
-  char *level_color = src_board->level_color;
-  int src_char_cur;
-  int i, i2;
-
-  for(i = 0; i < height; i++, src_offset += src_skip,
-   dest_offset += dest_skip)
-  {
-    for(i2 = 0; i2 < width; i2++, src_offset++,
-     dest_offset++)
-    {
-      src_char_cur = src_char[src_offset];
-      if(src_char_cur != 32 && level_id[dest_offset] != PLAYER)
-      {
-        level_id[dest_offset] = (char)convert_id;
-        level_param[dest_offset] = src_char_cur;
-        level_color[dest_offset] = src_color[src_offset];
-      }
     }
   }
 }
@@ -841,6 +607,8 @@ static void copy_block(struct world *mzx_world, int id, int x, int y,
   int src_height = src_board->board_height;
   int dest_width = src_board->board_width;
   int dest_height = src_board->board_height;
+  int src_offset;
+  int dest_offset;
 
   // Process for source type and handle prefixing
   switch(src_type)
@@ -861,6 +629,20 @@ static void copy_block(struct world *mzx_world, int id, int x, int y,
   prefix_first_xy_var(mzx_world, &src_x, &src_y, x, y,
    src_width, src_height);
 
+  // Clip and verify; the prefixer already handled the
+  // base coordinates, so just handle the width/height
+  if(width < 1)
+    width = 1;
+  if(height < 1)
+    height = 1;
+  if((src_x + width) > src_width)
+    width = src_width - src_x;
+  if((src_y + height) > src_height)
+    height = src_height - src_y;
+
+  // Get the offset that will generally be used.
+  src_offset = src_x + (src_y * src_width);
+
   // Process for dest type and handle prefixing if we aren't already done
   switch(dest_type)
   {
@@ -874,25 +656,25 @@ static void copy_block(struct world *mzx_world, int id, int x, int y,
         case 0:
         {
           // Board to string
-          load_string_board(mzx_world, str_buffer, width, height,
-           dest_param, src_board->level_param + src_x + (src_y * src_width),
-           src_width);
+          load_string_board(mzx_world, str_buffer,
+           src_board->level_param + src_offset, src_width,
+           width, height, dest_param);
           break;
         }
         case 1:
         {
           // Overlay to string
-          load_string_board(mzx_world, str_buffer, width, height,
-           dest_param, src_board->overlay + src_x +
-           (src_y * src_width), src_width);
+          load_string_board(mzx_world, str_buffer,
+           src_board->overlay + src_offset, src_width,
+           width, height, dest_param);
           break;
         }
         case 2:
         {
           // Vlayer to string
-          load_string_board(mzx_world, str_buffer, width, height,
-           dest_param, mzx_world->vlayer_chars + src_x +
-           (src_y * src_width), src_width);
+          load_string_board(mzx_world, str_buffer,
+           mzx_world->vlayer_chars + src_offset, src_width,
+           width, height, dest_param);
           break;
         }
       }
@@ -910,13 +692,23 @@ static void copy_block(struct world *mzx_world, int id, int x, int y,
       if(dest_param && !src_type)
         src_type = 3;
 
-      err = fsafetranslate(name_buffer, translated_name);
-      if(err == -FSAFE_SUCCESS || err == -FSAFE_MATCH_FAILED)
+      // Save MZM to string (2.90+)
+      if(mzx_world->version >= V290 && is_string(name_buffer))
       {
-        save_mzm(mzx_world, translated_name, src_x, src_y,
-         width, height, src_type, 1);
+        save_mzm_string(mzx_world, name_buffer, src_x, src_y,
+         width, height, src_type, 1, id);
       }
 
+      // Save MZM to file
+      else
+      {
+        err = fsafetranslate(name_buffer, translated_name);
+        if(err == -FSAFE_SUCCESS || err == -FSAFE_MATCH_FAILED)
+        {
+          save_mzm(mzx_world, translated_name, src_x, src_y,
+          width, height, src_type, 1);
+        }
+      }
       free(translated_name);
       return;
     }
@@ -935,71 +727,45 @@ static void copy_block(struct world *mzx_world, int id, int x, int y,
 
   prefix_last_xy_var(mzx_world, &dest_x, &dest_y, x, y,
    dest_width, dest_height);
-
-  // Clip and verify; the prefixers already handled the
-  // base coordinates, so just handle the width/height
-  if(width < 1)
-    width = 1;
-  if(height < 1)
-    height = 1;
-  if((src_x + width) > src_width)
-    width = src_width - src_x;
-  if((src_y + height) > src_height)
-    height = src_height - src_y;
+  
+  // Clip to destination dimensions as well
   if((dest_x + width) > dest_width)
     width = dest_width - dest_x;
   if((dest_y + height) > dest_height)
     height = dest_height - dest_y;
+
+  // Get the offset that will generally be used.
+  dest_offset = dest_x + (dest_y * dest_width);
 
   switch((dest_type << 2) | (src_type))
   {
     // Board to board
     case 0:
     {
-      char *id_buffer = cmalloc(width * height);
-      char *param_buffer = cmalloc(width * height);
-      char *color_buffer = cmalloc(width * height);
-      char *under_id_buffer = cmalloc(width * height);
-      char *under_param_buffer = cmalloc(width * height);
-      char *under_color_buffer = cmalloc(width * height);
+      copy_board_to_board(mzx_world,
+       src_board, src_offset,
+       src_board, dest_offset,
+       width, height);
 
-      copy_board_to_board_buffer(src_board, src_x, src_y, width,
-       height, id_buffer, param_buffer, color_buffer,
-       under_id_buffer, under_param_buffer, under_color_buffer,
-       src_board);
-      copy_board_buffer_to_board(src_board, dest_x, dest_y, width,
-       height, id_buffer, param_buffer, color_buffer,
-       under_id_buffer, under_param_buffer, under_color_buffer);
-
-      free(under_color_buffer);
-      free(under_param_buffer);
-      free(under_id_buffer);
-      free(color_buffer);
-      free(param_buffer);
-      free(id_buffer);
       break;
     }
     // Overlay to board
     case 1:
     {
-      int overlay_offset = src_x + (src_y * src_width);
-
-      copy_layer_to_board(src_board, dest_x, dest_y, width, height,
-       src_board->overlay + overlay_offset,
-       src_board->overlay_color + overlay_offset, src_width,
-       CUSTOM_BLOCK);
+      copy_layer_to_board(
+       src_board->overlay, src_board->overlay_color, src_width, src_offset,
+       src_board, dest_offset,
+       width, height, CUSTOM_BLOCK);
 
       break;
     }
     // Vlayer to board
     case 2:
     {
-      int vlayer_offset = src_x + (src_y * src_width);
-
-      copy_layer_to_board(src_board, dest_x, dest_y, width, height,
-       mzx_world->vlayer_chars + vlayer_offset,
-       mzx_world->vlayer_colors + vlayer_offset, src_width,
-       CUSTOM_BLOCK);
+      copy_layer_to_board(
+       mzx_world->vlayer_chars, mzx_world->vlayer_colors, src_width, src_offset,
+       src_board, dest_offset,
+       width, height, CUSTOM_BLOCK);
 
       break;
     }
@@ -1007,41 +773,30 @@ static void copy_block(struct world *mzx_world, int id, int x, int y,
     // Board to overlay
     case 4:
     {
-      int overlay_offset = dest_x + (dest_y * dest_width);
-
-      copy_board_to_layer(src_board, src_x, src_y, width, height,
-       src_board->overlay + overlay_offset,
-       src_board->overlay_color + overlay_offset, src_width);
+      copy_board_to_layer(
+       src_board, src_offset,
+       src_board->overlay, src_board->overlay_color, dest_width, dest_offset,
+       width, height);
 
       break;
     }
     // Overlay to overlay
     case 5:
     {
-      if(src_board->overlay_mode)
-      {
-        char *char_buffer = cmalloc(width * height);
-        char *color_buffer = cmalloc(width * height);
-        copy_layer_to_buffer(src_x, src_y, width, height,
-         src_board->overlay, src_board->overlay_color,
-         char_buffer, color_buffer, src_width);
-        copy_buffer_to_layer(dest_x, dest_y, width, height,
-         char_buffer, color_buffer, src_board->overlay,
-         src_board->overlay_color, dest_width);
-
-        free(color_buffer);
-        free(char_buffer);
-      }
+      copy_layer_to_layer(
+       src_board->overlay, src_board->overlay_color, src_width, src_offset,
+       src_board->overlay, src_board->overlay_color, dest_width, dest_offset,
+       width, height);
 
       break;
     }
     // Vlayer to overlay
     case 6:
     {
-      copy_layer_to_layer(src_x, src_y, dest_x, dest_y, width,
-       height, mzx_world->vlayer_chars, mzx_world->vlayer_colors,
-       src_board->overlay, src_board->overlay_color, src_width,
-       dest_width);
+      copy_layer_to_layer(
+       mzx_world->vlayer_chars, mzx_world->vlayer_colors, src_width, src_offset,
+       src_board->overlay, src_board->overlay_color, dest_width, dest_offset,
+       width, height);
 
       break;
     }
@@ -1049,39 +804,31 @@ static void copy_block(struct world *mzx_world, int id, int x, int y,
     // Board to vlayer
     case 8:
     {
-      int vlayer_offset = dest_x + (dest_y * dest_width);
-
-      copy_board_to_layer(src_board, src_x, src_y, width, height,
-       mzx_world->vlayer_chars + vlayer_offset,
-       mzx_world->vlayer_colors + vlayer_offset, dest_width);
+      copy_board_to_layer(
+       src_board, src_offset,
+       mzx_world->vlayer_chars, mzx_world->vlayer_colors, dest_width, dest_offset,
+       width, height);
 
       break;
     }
     // Overlay to vlayer
     case 9:
     {
-      copy_layer_to_layer(src_x, src_y, dest_x, dest_y, width,
-       height, src_board->overlay, src_board->overlay_color,
-       mzx_world->vlayer_chars, mzx_world->vlayer_colors,
-       src_width, dest_width);
+      copy_layer_to_layer(
+       src_board->overlay, src_board->overlay_color, src_width, src_offset,
+       mzx_world->vlayer_chars, mzx_world->vlayer_colors, dest_width, dest_offset,
+       width, height);
 
       break;
     }
     // Vlayer to vlayer
     case 10:
     {
-      char *char_buffer = cmalloc(width * height);
-      char *color_buffer = cmalloc(width * height);
+      copy_layer_to_layer(
+       mzx_world->vlayer_chars, mzx_world->vlayer_colors, src_width, src_offset,
+       mzx_world->vlayer_chars, mzx_world->vlayer_colors, dest_width, dest_offset,
+       width, height);
 
-      copy_layer_to_buffer(src_x, src_y, width, height,
-       mzx_world->vlayer_chars, mzx_world->vlayer_colors,
-       char_buffer, color_buffer, src_width);
-      copy_buffer_to_layer(dest_x, dest_y, width, height,
-       char_buffer, color_buffer, mzx_world->vlayer_chars,
-       mzx_world->vlayer_colors, dest_width);
-
-      free(color_buffer);
-      free(char_buffer);
       break;
     }
   }
@@ -1200,8 +947,13 @@ void run_robot(struct world *mzx_world, int id, int x, int y)
     // Reset x/y
     cur_robot->xpos = x;
     cur_robot->ypos = y;
-    // Update cycle count
 
+#ifdef CONFIG_EDITOR
+    cur_robot->commands_cycle = 0;
+    cur_robot->commands_caught = 0;
+#endif
+
+    // Update cycle count
     cur_robot->cycle_count++;
     if(cur_robot->cycle_count < cur_robot->robot_cycle)
     {
@@ -1212,7 +964,7 @@ void run_robot(struct world *mzx_world, int id, int x, int y)
     cur_robot->cycle_count = 0;
 
 #ifdef CONFIG_DEBYTECODE
-    prepare_robot_bytecode(cur_robot);
+    prepare_robot_bytecode(mzx_world, cur_robot);
 #endif
 
     // Does program exist?
@@ -1225,8 +977,9 @@ void run_robot(struct world *mzx_world, int id, int x, int y)
     if(id && is_cardinal_dir(walk_dir))
     {
       enum move_status status = move(mzx_world, x, y, dir_to_int(walk_dir),
-       CAN_PUSH | CAN_TRANSPORT | CAN_FIREWALK |
-       CAN_WATERWALK | (CAN_LAVAWALK * cur_robot->can_lavawalk));
+       CAN_PUSH | CAN_TRANSPORT | CAN_FIREWALK | CAN_WATERWALK |
+       CAN_LAVAWALK * cur_robot->can_lavawalk |
+       (cur_robot->can_goopwalk ? CAN_GOOPWALK : 0));
 
       if(status == HIT_EDGE)
       {
@@ -1295,12 +1048,25 @@ void run_robot(struct world *mzx_world, int id, int x, int y)
     // Get command number
     cmd = cmd_ptr[0];
 
-    if(debug_robot && editing)
+#ifdef CONFIG_EDITOR
+    if(mzx_world->editing && debug_robot_break)
     {
-      // Returns 1 if the user chose to stop the program.
-      if(debug_robot(mzx_world, cur_robot, id))
-        cmd = ROBOTIC_CMD_END;
+      switch(debug_robot_break(mzx_world, cur_robot, id, lines_run))
+      {
+        case DEBUG_EXIT:
+          break;
+
+        case DEBUG_GOTO:
+          // Restart the loop on the new destination command.
+          // Don't count the goto as a command.
+          lines_run--;
+          continue;
+
+        case DEBUG_HALT:
+          goto breaker;
+      }
     }
+#endif
 
     // Act according to command
     switch(cmd)
@@ -1373,8 +1139,9 @@ void run_robot(struct world *mzx_world, int id, int x, int y)
               enum move_status status;
 
               status = move(mzx_world, x, y, dir_to_int(direction),
-               CAN_PUSH | CAN_TRANSPORT | CAN_FIREWALK |
-               CAN_WATERWALK | CAN_LAVAWALK * cur_robot->can_lavawalk);
+               CAN_PUSH | CAN_TRANSPORT | CAN_FIREWALK | CAN_WATERWALK |
+               CAN_LAVAWALK * cur_robot->can_lavawalk |
+               (cur_robot->can_goopwalk ? CAN_GOOPWALK : 0));
 
               if(status == NO_HIT)
               {
@@ -1402,7 +1169,8 @@ void run_robot(struct world *mzx_world, int id, int x, int y)
 
             status = move(mzx_world, x, y, dir_to_int(direction),
              CAN_PUSH | CAN_TRANSPORT | CAN_FIREWALK | CAN_WATERWALK |
-             CAN_LAVAWALK * cur_robot->can_lavawalk);
+             CAN_LAVAWALK * cur_robot->can_lavawalk |
+             (cur_robot->can_goopwalk ? CAN_GOOPWALK : 0));
 
             if(status)
             {
@@ -1564,7 +1332,14 @@ void run_robot(struct world *mzx_world, int id, int x, int y)
             dest.length = strlen(src_buffer);
           }
 
-          set_string(mzx_world, dest_buffer, &dest, id);
+          gotoed = set_string(mzx_world, dest_buffer, &dest, id);
+
+          // Loading source/robots from strings might have changed these
+          if(gotoed)
+          {
+            program = cur_robot->program_bytecode;
+            cmd_ptr = program + cur_robot->cur_prog_line;
+          }
         }
         else
         {
@@ -1577,29 +1352,30 @@ void run_robot(struct world *mzx_world, int id, int x, int y)
           {
             gotoed = set_counter_special(mzx_world, dest_buffer, value, id);
 
-            // We loaded a new game successfully; get out of here
-            if(mzx_world->swapped)
+            // On a game state change, we need to return to the main game loop.
+            if(mzx_world->change_game_state)
               return;
 
             // Some specials might have changed these
 #ifdef CONFIG_DEBYTECODE
-            prepare_robot_bytecode(cur_robot);
+            prepare_robot_bytecode(mzx_world, cur_robot);
 #endif
             program = cur_robot->program_bytecode;
             cmd_ptr = program + cur_robot->cur_prog_line;
 
-            // FIXME: For the moment, end the cycle if we save the game
-            //        or the world. The save_world() function is trying to
-            //        "optimize" a live board, which breaks commands like
-            //        DIE which expect robot IDs to be in sequence (the ID is
-            //        cached for the whole cycle).
-            if(mzx_world->special_counter_return == FOPEN_SAVE_GAME ||
-             (mzx_world->special_counter_return == FOPEN_SAVE_WORLD))
+            // Prior to 2.90, SAVE_GAME works immediately and requires the
+            // robot's cycle to be ended for it to safely work. After 2.90
+            // SAVE_GAME takes place at the end of the cycle, so this is
+            // no longer necessary.
+            if(mzx_world->special_counter_return == FOPEN_SAVE_GAME)
             {
-              if(!program[cur_robot->cur_prog_line])
-                cur_robot->cur_prog_line = 0;
+              if(mzx_world->version < V290)
+              {
+                if(!program[cur_robot->cur_prog_line])
+                  cur_robot->cur_prog_line = 0;
 
-              goto breaker;
+                goto breaker;
+              }
             }
           }
           else
@@ -1681,7 +1457,7 @@ void run_robot(struct world *mzx_world, int id, int x, int y)
 
       case ROBOTIC_CMD_IF: // if c?n l
       {
-        int difference = 0;
+        int dest_value = 0, src_value = 0;
         char *dest_string = cmd_ptr + 2;
         char *p2 = next_param_pos(cmd_ptr + 1);
         char *src_string = p2 + 3;
@@ -1694,6 +1470,8 @@ void run_robot(struct world *mzx_world, int id, int x, int y)
         {
           struct string dest;
           struct string src;
+          int allow_wildcards = 0;
+          int exact_case = 0;
 
           tr_msg(mzx_world, dest_string, id, dest_buffer);
           // Get a pointer to the dest string
@@ -1721,55 +1499,80 @@ void run_robot(struct world *mzx_world, int id, int x, int y)
             src.length = strlen(src_buffer);
           }
 
-          difference = compare_strings(&dest, &src);
+          // String equality extensions (2.91+)
+          if(mzx_world->version >= V291)
+          {
+            if(comparison == EXACTLY_EQUAL || comparison == WILD_EXACTLY_EQUAL)
+              exact_case = 1;
+
+            if(comparison == WILD_EQUAL || comparison == WILD_EXACTLY_EQUAL)
+              allow_wildcards = 1;
+          }
+
+          src_value = 0;
+          dest_value = compare_strings(&dest, &src,
+           exact_case, allow_wildcards);
         }
         else
         {
-          int dest_value = parse_param(mzx_world, cmd_ptr + 1, id);
-          int src_value = parse_param(mzx_world, src_string, id);
-          difference = dest_value - src_value;
+          dest_value = parse_param(mzx_world, cmd_ptr + 1, id);
+          src_value = parse_param(mzx_world, src_string, id);
+        }
+
+        if(mzx_world->version < V290)
+        {
+          // In port releases prior to 2.90b there was a horrible
+          // bug stopping comparisons between numbers with a
+          // difference greater than 2^31-1.
+          // To our great regret we must support this functionality
+          // for older worlds.
+          dest_value = dest_value - src_value;
+          src_value = 0;
         }
 
         switch(comparison)
         {
           case EQUAL:
+          case EXACTLY_EQUAL:
+          case WILD_EQUAL:
+          case WILD_EXACTLY_EQUAL:
           {
-            if(!difference)
+            if(dest_value == src_value)
               success = 1;
             break;
           }
 
           case LESS_THAN:
           {
-            if(difference < 0)
+            if(dest_value < src_value)
               success = 1;
             break;
           }
 
           case GREATER_THAN:
           {
-            if(difference > 0)
+            if(dest_value > src_value)
               success = 1;
             break;
           }
 
           case GREATER_THAN_OR_EQUAL:
           {
-            if(difference >= 0)
+            if(dest_value >= src_value)
               success = 1;
             break;
           }
 
           case LESS_THAN_OR_EQUAL:
           {
-            if(difference <= 0)
+            if(dest_value <= src_value)
               success = 1;
             break;
           }
 
           case NOT_EQUAL:
           {
-            if(difference)
+            if(dest_value != src_value)
               success = 1;
             break;
           }
@@ -2015,37 +1818,43 @@ void run_robot(struct world *mzx_world, int id, int x, int y)
 
           case RIGHTPRESSED:
           {
-            success = get_key_status(keycode_internal, IKEY_RIGHT) > 0;
+            success =
+             get_key_status(keycode_internal_wrt_numlock, IKEY_RIGHT) > 0;
             break;
           }
 
           case LEFTPRESSED:
           {
-            success = get_key_status(keycode_internal, IKEY_LEFT) > 0;
+            success =
+             get_key_status(keycode_internal_wrt_numlock, IKEY_LEFT) > 0;
             break;
           }
 
           case UPPRESSED:
           {
-            success = get_key_status(keycode_internal, IKEY_UP) > 0;
+            success =
+             get_key_status(keycode_internal_wrt_numlock, IKEY_UP) > 0;
             break;
           }
 
           case DOWNPRESSED:
           {
-            success = get_key_status(keycode_internal, IKEY_DOWN) > 0;
+            success =
+             get_key_status(keycode_internal_wrt_numlock, IKEY_DOWN) > 0;
             break;
           }
 
           case SPACEPRESSED:
           {
-            success = get_key_status(keycode_internal, IKEY_SPACE) > 0;
+            success =
+             get_key_status(keycode_internal_wrt_numlock, IKEY_SPACE) > 0;
             break;
           }
 
           case DELPRESSED:
           {
-            success = get_key_status(keycode_internal, IKEY_DELETE) > 0;
+            success =
+             get_key_status(keycode_internal_wrt_numlock, IKEY_DELETE) > 0;
             break;
           }
 
@@ -2062,8 +1871,9 @@ void run_robot(struct world *mzx_world, int id, int x, int y)
           }
         }
 
-        if(cmd == 19)
-          success ^= 1;     // Reverse truth if NOT is present
+        // Reverse truth if NOT is present
+        if(cmd == ROBOTIC_CMD_IF_NOT_CONDITION)
+          success ^= 1;
 
         if(success)
         {
@@ -2093,6 +1903,10 @@ void run_robot(struct world *mzx_world, int id, int x, int y)
           {
             char *p4 = next_param_pos(p3);
             gotoed = send_self_label_tr(mzx_world,  p4 + 1, id);
+
+            // The port up through 2.84 allowed this to iterate the entire board.
+            if(mzx_world->version < VERSION_PORT || mzx_world->version > V284)
+              break;
           }
         }
 
@@ -2190,7 +2004,11 @@ void run_robot(struct world *mzx_world, int id, int x, int y)
         {
           int ret = 0;
 
-          prefix_mid_xy(mzx_world, &check_x, &check_y, x, y);
+          if (check_param < MAX_SPRITES &&
+           mzx_world->sprite_list[check_param]->flags & SPRITE_UNBOUND)
+            prefix_mid_xy_unbound(mzx_world, &check_x, &check_y, x, y);
+          else
+            prefix_mid_xy(mzx_world, &check_x, &check_y, x, y);
 
           /* 256 == p?? */
           if(check_param == 256)
@@ -2250,8 +2068,10 @@ void run_robot(struct world *mzx_world, int id, int x, int y)
             check_x += check_sprite->x;
             check_y += check_sprite->y;
           }
-
-          prefix_mid_xy(mzx_world, &check_x, &check_y, x, y);
+          if (check_sprite->flags & SPRITE_UNBOUND)
+            prefix_mid_xy_unbound(mzx_world, &check_x, &check_y, x, y);
+          else
+            prefix_mid_xy(mzx_world, &check_x, &check_y, x, y);
           offset = check_x + (check_y * board_width);
 
           ret = sprite_colliding_xy(mzx_world, check_sprite,
@@ -2742,9 +2562,11 @@ void run_robot(struct world *mzx_world, int id, int x, int y)
 
           // Move player
           move_player(mzx_world, dir_to_int(direction));
-          if((mzx_world->player_x == old_x) &&
+
+          if((cmd == ROBOTIC_CMD_MOVE_PLAYER_DIR_OR) &&
+           (mzx_world->player_x == old_x) &&
            (mzx_world->player_y == old_y) &&
-           (mzx_world->current_board_id == old_board) && (cmd == 62) &&
+           (mzx_world->current_board_id == old_board) &&
            (mzx_world->target_where == old_target))
           {
             char *p2 = next_param_pos(cmd_ptr + 1);
@@ -2836,6 +2658,7 @@ void run_robot(struct world *mzx_world, int id, int x, int y)
           update_blocked = 1;
           break;
         }
+        break;
       }
 
       case ROBOTIC_CMD_SWITCH: // switch dir dir
@@ -2895,14 +2718,14 @@ void run_robot(struct world *mzx_world, int id, int x, int y)
           {
             // Block
             shoot(mzx_world, x, y, dir_to_int(direction),
-             cur_robot->bullet_type);
+             MIN(cur_robot->bullet_type, 2));
 
             if(_bl[dir_to_int(direction)])
               _bl[dir_to_int(direction)] = 3;
           }
         }
         // MZX 2.83 erroneously ended the cycle here, some games depend on it...
-        if(mzx_world->version == 0x0253)
+        if(mzx_world->version == V283)
         {
           // Continue to the next line.
           cur_robot->cur_prog_line += program[cur_robot->cur_prog_line] + 2;
@@ -2949,7 +2772,7 @@ void run_robot(struct world *mzx_world, int id, int x, int y)
           }
         }
         // MZX 2.83 erroneously ended the cycle here, some games depend on it...
-        if(mzx_world->version == 0x0253)
+        if(mzx_world->version == V283)
         {
           // Continue to the next line.
           cur_robot->cur_prog_line += program[cur_robot->cur_prog_line] + 2;
@@ -2971,7 +2794,7 @@ void run_robot(struct world *mzx_world, int id, int x, int y)
           }
         }
         // MZX 2.83 erroneously ended the cycle here, some games depend on it...
-        if(mzx_world->version == 0x0253)
+        if(mzx_world->version == V283)
         {
           // Continue to the next line.
           cur_robot->cur_prog_line += program[cur_robot->cur_prog_line] + 2;
@@ -2993,7 +2816,7 @@ void run_robot(struct world *mzx_world, int id, int x, int y)
           }
         }
         // MZX 2.83 erroneously ended the cycle here, some games depend on it...
-        if(mzx_world->version == 0x0253)
+        if(mzx_world->version == V283)
         {
           // Continue to the next line.
           cur_robot->cur_prog_line += program[cur_robot->cur_prog_line] + 2;
@@ -3064,14 +2887,23 @@ void run_robot(struct world *mzx_world, int id, int x, int y)
 
           tr_msg(mzx_world, cmd_ptr + 3, id, mzm_name_buffer);
 
-          if(!fsafetranslate(mzm_name_buffer, translated_name))
+          if(mzx_world->version >= V290 && is_string(mzm_name_buffer))
           {
-            load_mzm(mzx_world, translated_name, put_x, put_y,
-             put_param, 1);
+            struct string src;
+            
+            if(get_string(mzx_world, mzm_name_buffer, &src, id))
+              load_mzm_memory(mzx_world, mzm_name_buffer, put_x, put_y,
+               put_param, 1, src.value, src.length);
           }
-
+          else
+          {
+            if(!fsafetranslate(mzm_name_buffer, translated_name))
+            {
+              load_mzm(mzx_world, translated_name, put_x, put_y,
+              put_param, 1);
+            }
+          }
           free(translated_name);
-
           if(id)
           {
             int offset = x + (y * board_width);
@@ -3099,10 +2931,13 @@ void run_robot(struct world *mzx_world, int id, int x, int y)
           if(put_param == 256)
             put_param = mzx_world->sprite_num;
 
-          prefix_mid_xy(mzx_world, &put_x, &put_y, x, y);
-
           if((unsigned int)put_param < 256)
           {
+            if (mzx_world->sprite_list[put_param]->flags & SPRITE_UNBOUND)
+              prefix_mid_xy_unbound(mzx_world, &put_x, &put_y, x, y);
+            else
+              prefix_mid_xy(mzx_world, &put_x, &put_y, x, y);
+
             plot_sprite(mzx_world, mzx_world->sprite_list[put_param],
              put_color, put_x, put_y);
           }
@@ -3153,7 +2988,7 @@ void run_robot(struct world *mzx_world, int id, int x, int y)
         if(!strcasecmp(mzx_world->global_robot.robot_name,
          robot_name_buffer))
         {
-          replace_robot(src_board, &mzx_world->global_robot, id);
+          replace_robot(mzx_world, src_board, &mzx_world->global_robot, id);
         }
         else
         {
@@ -3165,7 +3000,7 @@ void run_robot(struct world *mzx_world, int id, int x, int y)
 
             if(found_robot != cur_robot)
             {
-              replace_robot(src_board, found_robot, id);
+              replace_robot(mzx_world, src_board, found_robot, id);
             }
           }
         }
@@ -3188,7 +3023,7 @@ void run_robot(struct world *mzx_world, int id, int x, int y)
         if(is_robot(d_id))
         {
           int idx = level_param[offset];
-          replace_robot(src_board, src_board->robot_list[idx], id);
+          replace_robot(mzx_world, src_board, src_board->robot_list[idx], id);
         }
 
         cur_robot = src_board->robot_list[id];
@@ -3215,7 +3050,8 @@ void run_robot(struct world *mzx_world, int id, int x, int y)
             if(is_robot(d_id))
             {
               int idx = level_param[offset];
-              replace_robot(src_board, src_board->robot_list[idx], id);
+              replace_robot(mzx_world, src_board, src_board->robot_list[idx],
+               id);
             }
           }
         }
@@ -3245,8 +3081,8 @@ void run_robot(struct world *mzx_world, int id, int x, int y)
 
             if(!move_dir(src_board, &duplicate_x, &duplicate_y, duplicate_dir))
             {
-              dest_id = duplicate_robot(src_board, cur_robot,
-               duplicate_x, duplicate_y);
+              dest_id = duplicate_robot(mzx_world, src_board, cur_robot,
+               duplicate_x, duplicate_y, 0);
 
               if(dest_id != -1)
                 place_at_xy(mzx_world, duplicate_id, duplicate_color,
@@ -3282,8 +3118,8 @@ void run_robot(struct world *mzx_world, int id, int x, int y)
             duplicate_id = ROBOT;
           }
 
-          dest_id = duplicate_robot(src_board, cur_robot,
-           duplicate_x, duplicate_y);
+          dest_id = duplicate_robot(mzx_world, src_board, cur_robot,
+           duplicate_x, duplicate_y, 0);
 
           if(dest_id != -1)
           {
@@ -3541,8 +3377,9 @@ void run_robot(struct world *mzx_world, int id, int x, int y)
           {
             if((move(mzx_world, x, y, dir_to_int(direction),
              CAN_PUSH | CAN_TRANSPORT | CAN_FIREWALK | CAN_WATERWALK |
-             CAN_LAVAWALK * cur_robot->can_lavawalk)) &&
-             (cmd == 232))
+             CAN_LAVAWALK * cur_robot->can_lavawalk |
+             (cur_robot->can_goopwalk ? CAN_GOOPWALK : 0))) &&
+             (cmd == ROBOTIC_CMD_PERSISTENT_GO))
             {
               cur_robot->pos_within_line--; // persistent...
             }
@@ -3636,12 +3473,12 @@ void run_robot(struct world *mzx_world, int id, int x, int y)
 
       case ROBOTIC_CMD_TELEPORT: // teleport
       {
+        struct board *cur_board = mzx_world->current_board;
         char board_dest_buffer[ROBOT_MAX_TR];
         char *p2 = next_param_pos(cmd_ptr + 1);
         int teleport_x = parse_param(mzx_world, p2, id);
         char *p3 = next_param_pos(p2);
         int teleport_y = parse_param(mzx_world, p3, id);
-        int current_board_id = mzx_world->current_board_id;
         int board_id;
 
         tr_msg(mzx_world, cmd_ptr + 2, id, board_dest_buffer);
@@ -3653,8 +3490,7 @@ void run_robot(struct world *mzx_world, int id, int x, int y)
           prefix_mid_xy(mzx_world, &teleport_x, &teleport_y, x, y);
 
           // And switch back
-          set_current_board_ext(mzx_world,
-           mzx_world->board_list[current_board_id]);
+          set_current_board_ext(mzx_world, cur_board);
           mzx_world->target_board = board_id;
           mzx_world->target_x = teleport_x;
           mzx_world->target_y = teleport_y;
@@ -3986,8 +3822,10 @@ void run_robot(struct world *mzx_world, int id, int x, int y)
           char_buffer[i] = parse_param(mzx_world, next_param, id);
           next_param = next_param_pos(next_param);
         }
-
-        ec_change_char(char_num, char_buffer);
+        // Prior to 2.90 char params are clipped
+        if(mzx_world->version < V290) char_num &= 0xFF;
+        if(char_num <= 0xFF || layer_renderer_check(true))
+          ec_change_char(char_num, char_buffer);
         break;
       }
 
@@ -4642,7 +4480,8 @@ void run_robot(struct world *mzx_world, int id, int x, int y)
 
         offset = duplicate_x + (duplicate_y * board_width);
         dest_id =
-         duplicate_robot(src_board, cur_robot, duplicate_x, duplicate_y);
+         duplicate_robot(mzx_world, src_board, cur_robot,
+          duplicate_x, duplicate_y, 0);
 
         if(dest_id != -1)
         {
@@ -4690,7 +4529,8 @@ void run_robot(struct world *mzx_world, int id, int x, int y)
 
         offset = duplicate_x + (duplicate_y * board_width);
         dest_id =
-         duplicate_robot(src_board, cur_robot, duplicate_x, duplicate_y);
+         duplicate_robot(mzx_world, src_board, cur_robot,
+          duplicate_x, duplicate_y, 0);
 
         if(dest_id != -1)
         {
@@ -4814,7 +4654,11 @@ void run_robot(struct world *mzx_world, int id, int x, int y)
         char *p4 = next_param_pos(p3);
         char *p5 = next_param_pos(p4);
         char *p6 = next_param_pos(p5);
-        int src_x, src_y, dest_x, dest_y;
+        // These will always be set, but the compiler doesn't think so.
+        int src_x = 0;
+        int src_y = 0;
+        int dest_x = 0;
+        int dest_y = 0;
         int width = parse_param(mzx_world, p3, id);
         int height = parse_param(mzx_world, p4, id);
 
@@ -4832,11 +4676,11 @@ void run_robot(struct world *mzx_world, int id, int x, int y)
         if((type[2] == type[3]) || ((type[2] > 2) && (type[3] == 0)))
           dest_type = type[2];
 
-        //something is wrong with the params, abort
+        // something is wrong with the params, abort
         if((src_type < 0) || (dest_type < 0))
           break;
 
-        if (cmd == ROBOTIC_CMD_COPY_OVERLAY_BLOCK)
+        if(cmd == ROBOTIC_CMD_COPY_OVERLAY_BLOCK)
         {
           if(src_type < 2)
             src_type ^= 1;
@@ -4915,8 +4759,9 @@ void run_robot(struct world *mzx_world, int id, int x, int y)
               int d_flag = flags[d_id];
 
               if((d_id == ROBOT_PUSHABLE) || (d_id == PLAYER) ||
-               ((push_dir < 2) && (d_flag & A_PUSHNS)) ||
-               ((push_dir >= 2) && (d_flag & A_PUSHEW)))
+               ((int_dir < 2) && (d_flag & A_PUSHNS)) ||
+               ((int_dir >= 2) && (d_flag & A_PUSHEW)) ||
+               (d_id == SENSOR))
               {
                 push(mzx_world, x, y, int_dir, 0);
                 update_blocked = 1;
@@ -4938,6 +4783,9 @@ void run_robot(struct world *mzx_world, int id, int x, int y)
         {
           char char_buffer[14];
           int i;
+
+          // Prior to 2.90 char params are clipped
+          if(mzx_world->version < V290) char_num &= 0xFF;
 
           ec_read_char(char_num, char_buffer);
 
@@ -5018,6 +4866,9 @@ void run_robot(struct world *mzx_world, int id, int x, int y)
 
         if(is_cardinal_dir(flip_dir))
         {
+          // Prior to 2.90 char params are clipped
+          if(mzx_world->version < V290) char_num &= 0xFF;
+          
           ec_read_char(char_num, char_buffer);
 
           switch(flip_dir)
@@ -5066,6 +4917,14 @@ void run_robot(struct world *mzx_world, int id, int x, int y)
         char char_buffer[14];
         char *p2 = next_param_pos(cmd_ptr + 1);
         int dest_char = parse_param(mzx_world, p2, id);
+
+        // Prior to 2.90 char params are clipped
+        if(mzx_world->version < V290)
+        {
+          src_char &= 0xFF;
+          dest_char &= 0xFF;
+        }
+        
         ec_read_char(src_char, char_buffer);
         ec_change_char(dest_char, char_buffer);
         break;
@@ -5076,9 +4935,9 @@ void run_robot(struct world *mzx_world, int id, int x, int y)
         int fx_num = parse_param(mzx_world, cmd_ptr + 1, id);
         char *p2 = next_param_pos(cmd_ptr + 1);
 
-        if(strlen(p2 + 1) > 68)
-          p2[69] = 0;
-        strcpy(mzx_world->custom_sfx + (fx_num * 69), p2 + 1);
+        if(strlen(p2 + 1) >= SFX_SIZE)
+          p2[SFX_SIZE] = 0;
+        strcpy(mzx_world->custom_sfx + (fx_num * SFX_SIZE), p2 + 1);
         break;
       }
 
@@ -5144,6 +5003,8 @@ void run_robot(struct world *mzx_world, int id, int x, int y)
       {
         char charset_name[ROBOT_MAX_TR];
         char *translated_name = cmalloc(MAX_PATH);
+        char *src_name;
+        int pos;
 
         tr_msg(mzx_world, cmd_ptr + 2, id, charset_name);
 
@@ -5151,35 +5012,48 @@ void run_robot(struct world *mzx_world, int id, int x, int y)
         if(charset_name[0] == '+')
         {
           char tempc = charset_name[3];
-          char *next;
-          int pos;
 
           charset_name[3] = 0;
-          pos = (int)strtol(charset_name + 1, &next, 16);
+          pos = (int)strtol(charset_name + 1, &src_name, 16);
           charset_name[3] = tempc;
-
-          if(!fsafetranslate(next, translated_name))
-            ec_load_set_var(translated_name, pos);
         }
         else
 
         if(charset_name[0] == '@')
         {
-          char tempc = charset_name[4];
-          char *next;
-          int pos;
-
-          charset_name[4] = 0;
-          pos = (int)strtol(charset_name + 1, &next, 10);
-          charset_name[4] = tempc;
-
-          if(!fsafetranslate(next, translated_name))
-            ec_load_set_var(translated_name, pos);
+          char tempc;
+          int maxlen;
+          // The offset string length was increased in 2.90 to
+          // allow for accessing extended char sets.
+          if(mzx_world->version < V290)
+            maxlen = 3;
+          else
+            maxlen = 4;
+          tempc = charset_name[maxlen+1];
+          charset_name[maxlen+1] = 0;
+          pos = (int)strtol(charset_name + 1, &src_name, 10);
+          charset_name[maxlen+1] = tempc;
         }
         else
         {
-          if(!fsafetranslate(charset_name, translated_name))
-            ec_load_set(translated_name);
+          src_name = charset_name;
+          pos = 0;
+        }
+
+        // Load from string (2.90+)
+        if(mzx_world->version >= V290 && is_string(src_name))
+        {
+          struct string src;
+
+          if(get_string(mzx_world, src_name, &src, id))
+            ec_mem_load_set_var(src.value, src.length, pos, mzx_world->version);
+        }
+        else
+
+        // Load from file
+        if(!fsafetranslate(src_name, translated_name))
+        {
+          ec_load_set_var(translated_name, pos, mzx_world->version);
         }
 
         free(translated_name);
@@ -5248,8 +5122,21 @@ void run_robot(struct world *mzx_world, int id, int x, int y)
 
         tr_msg(mzx_world, cmd_ptr + 2, id, name_buffer);
 
+        // Load palette from string (2.90+)
+        if(mzx_world->version >= V290 && is_string(name_buffer))
+        {
+          struct string src;
+
+          if(get_string(mzx_world, name_buffer, &src, id))
+            load_palette_mem(src.value, src.length);
+        }
+        else
+
+        // Load palette from file
         if(!fsafetranslate(name_buffer, translated_name))
+        {
           load_palette(translated_name);
+        }
 
         free(translated_name);
         pal_update = true;
@@ -5331,7 +5218,8 @@ void run_robot(struct world *mzx_world, int id, int x, int y)
         if(redo_load == 1)
           break;
 
-        mzx_world->swapped = 1;
+        // Exit to the main loop and let it know we're swapping worlds.
+        mzx_world->change_game_state = CHANGE_STATE_SWAP_WORLD;
         free(translated_name);
         return;
       }
@@ -5688,7 +5576,7 @@ void run_robot(struct world *mzx_world, int id, int x, int y)
         // compatibility has been broken forever, so only do this for
         // old worlds.
 
-        if(mzx_world->version <= 0x0249)
+        if(mzx_world->version < VERSION_PORT)
         {
           if(last_label == cur_robot->cur_prog_line)
             goto breaker;
@@ -5713,20 +5601,50 @@ void run_robot(struct world *mzx_world, int id, int x, int y)
 
     next_cmd_prefix:
     // Next line
-    cur_robot->pos_within_line = 0;
     first_cmd = 0;
 
     if(!cur_robot->cur_prog_line)
+    {
+      cur_robot->pos_within_line = 0;
       break;
+    }
 
+#ifdef CONFIG_EDITOR
+    // Check the watchpoints before incrementing the program.
+    if(mzx_world->editing && debug_robot_watch)
+    {
+      // Returns 1 if the user chose to stop the program.
+      switch(debug_robot_watch(mzx_world, cur_robot, id, lines_run))
+      {
+        case DEBUG_EXIT:
+          break;
+
+        case DEBUG_GOTO:
+          // If this robot received a label, don't advance the program.
+          if(old_pos != cur_robot->cur_prog_line)
+            gotoed = 1;
+          break;
+
+        case DEBUG_HALT:
+          goto breaker;
+      }
+    }
+#endif
+
+    // If we're returning from a subroutine, we don't want to set the
+    // pos_within_line. Other sends will set it to zero anyway.
     if(!gotoed)
+    {
       cur_robot->cur_prog_line += program[cur_robot->cur_prog_line] + 2;
+      cur_robot->pos_within_line = 0;
+    }
 
     if(!program[cur_robot->cur_prog_line])
     {
       //End of program
       end_prog:
       cur_robot->cur_prog_line = 0;
+      cur_robot->pos_within_line = 0;
       break;
     }
 
@@ -5736,9 +5654,44 @@ void run_robot(struct world *mzx_world, int id, int x, int y)
     }
     find_player(mzx_world);
 
+    // Some commands can decrement lines_run, putting it at -1 here,
+    // so add 2 to lines_run for the check.
+    if ((lines_run + 2) % 1000000 == 0) {
+      if (peek_exit_input()) {
+        bool exit = false;
+        update_event_status();
+        if (get_exit_status()) {
+          exit = true;
+        } else {
+          if (get_key_status(keycode_internal, IKEY_ESCAPE)) {
+            exit = true;
+          }
+        }
+        if (exit) {
+          m_show();
+          dialog_fadein();
+          exit = !confirm(mzx_world,
+           "MegaZeux appears to have frozen. Do you want to exit?");
+          dialog_fadeout();
+          update_screen();
+          if (exit)
+          {
+            mzx_world->change_game_state =
+             CHANGE_STATE_REQUEST_EXIT;
+            break;
+          }
+        }
+      }
+    }
+
   } while(((++lines_run) < mzx_world->commands) && (!done));
 
   breaker:
+
+#ifdef CONFIG_EDITOR
+  cur_robot->commands_total += lines_run;
+  cur_robot->commands_cycle = lines_run;
+#endif
 
   cur_robot->cycle_count = 0; // In case a label changed it
   // Reset x/y (from movements)

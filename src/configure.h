@@ -33,6 +33,13 @@ enum ratio_type
   RATIO_STRETCH
 };
 
+enum update_auto_check_mode
+{
+  UPDATE_AUTO_CHECK_OFF = 0,
+  UPDATE_AUTO_CHECK_ON,
+  UPDATE_AUTO_CHECK_SILENT,
+};
+
 struct config_info
 {
   // Video options
@@ -46,6 +53,7 @@ struct config_info
   int force_bpp;
   enum ratio_type video_ratio;
   char gl_filter_method[16];
+  char gl_scaling_shader[32];
   int gl_vsync;
 
   // Audio options
@@ -54,6 +62,7 @@ struct config_info
   int oversampling_on;
   int resample_mode;
   int modplug_resample_mode;
+  int max_simultaneous_samples;
   int music_volume;
   int sam_volume;
   int pc_speaker_volume;
@@ -68,6 +77,8 @@ struct config_info
   int disassemble_extras;
   int disassemble_base;
   int startup_editor;
+  int standalone_mode;
+  int no_titlescreen;
 
   // Misc options
   int mask_midchars;
@@ -84,6 +95,8 @@ struct config_info
   int update_host_count;
   char **update_hosts;
   char update_branch_pin[256];
+  int update_auto_check;
+  int update_available;
 #endif
 };
 
@@ -92,12 +105,14 @@ typedef void (* config_function)(struct config_info *conf,
 
 CORE_LIBSPEC void set_config_from_file(struct config_info *conf,
  const char *conf_file_name);
+CORE_LIBSPEC void set_config_from_file_startup(struct config_info *conf,
+ const char *conf_file_name);
 CORE_LIBSPEC void default_config(struct config_info *conf);
 CORE_LIBSPEC void set_config_from_command_line(struct config_info *conf,
  int *argc, char *argv[]);
 CORE_LIBSPEC void free_config(struct config_info *conf);
 
-typedef void (* find_change_option)(void *conf, char *name, char *value,
+typedef int (* find_change_option)(void *conf, char *name, char *value,
  char *extended_data);
 
 #ifdef CONFIG_EDITOR

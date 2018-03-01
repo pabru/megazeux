@@ -1,5 +1,5 @@
-# Configuration file for MegaZeux
-# Jan 11th, 2013
+# Configuration file for MegaZeux 2.91b
+# January 6th, 2018
 
 # Comments begin with #. Whitespace is ignored. Empty lines are
 # ignored as well.
@@ -52,7 +52,9 @@
 #
 # Uncomment either of the lines below (but not both) if you want to try it.
 # The "overlay2" mode is cheaper, but will be less accurate due to the use
-# of chroma subsampling instead of a full YUV encode.
+# of chroma subsampling instead of a full YUV encode. Furthermore, the
+# "overlay2" mode does not support newer graphical features such as unbound
+# sprites. The use of it is not recommended.
 
 # video_output = overlay1
 # video_output = overlay2
@@ -74,8 +76,9 @@
 # MegaZeux also provides a scaler for programmable hardware. If you have
 # OpenGL 2.0 or OpenGL ES 2.0 capable hardware, you should use this renderer.
 # Written by Logicow, it uses shaders to do the tiling and scaling. There
-# are four shader programs that can be customized. This renderer is called
-# "glsl". It is the highest quality and best performing renderer.
+# are several shader programs that can be selected at runtime using the F2
+# menu. This renderer is called "glsl". It is the highest quality and best
+# performing renderer.
 #
 # Uncomment ONE of the lines below:
 
@@ -86,9 +89,9 @@
 # The OpenGL and YUV overlay renderers can be configured to preserve aspect
 # ratio where possible, in window and fullscreen modes. The supported
 # ratios are "classic" (4:3) and "modern" (64:35). The ratio type "stretch"
-# disables any aspect ratio preservation, and is the default.
+# disables any aspect ratio preservation. "Modern" is the default.
 
-# video_ratio = stretch
+# video_ratio = modern
 
 # OpenGL will, by default, linearly interpolate pixels as it upscales
 # to your requested resolution. This creates an output with more "blur",
@@ -98,6 +101,15 @@
 # setting is "linear".
 
 # gl_filter_method = nearest
+
+# The GLSL renderer uses scaling shaders to determine the scaling method
+# instead of gl_filter_method. The default shader to be loaded when MZX
+# starts is assets/shaders/scaler.frag (which is "semisoft" by default).
+# Change this config option to specify a different shader to load on startup.
+# For a list of valid options, see the F2 menu or the extra shaders folder.
+# Do not include an extension.
+
+# gl_scaling_shader = semisoft
 
 # Some OpenGL driver settings may default vertical sync on, which looks
 # visually better (especially on CRTs) but can cause "speed 1" to run
@@ -113,13 +125,15 @@
 # Resolution MZX uses for fullscreen. With the software renderer, this
 # will center MZX on the screen, and will not scale it.
 # However, with the hardware renderers above, MZX will attempt to scale
-# itself to match this resolution. Best results are obtained with
-# multiples of 640x350, but any supported screen mode should work.
+# itself to match this resolution. Best results are obtained by using
+# a well-supported resolution like 1280,720 in conjunction with the
+# modern aspect ratio.
 # Give in x,y format. Use this if the defaults are giving you problems,
 # especially in the software renderer.
-# This resolution may not actually work; if it doesn't, you will
-# get the nearest that does.
+# The resolution "1280,720" is the default for all scalable renderers;
+# "640,480" is the default for the software renderer.
 
+# fullscreen_resolution = 1280,720
 # fullscreen_resolution = 640,480
 
 # The resolution MZX uses in a window. If you renderer supports
@@ -211,6 +225,11 @@
 
 # pc_speaker_volume = 8
 
+# The maximum number of samples that can be played simultaneously.
+# Set to -1 for an unlimited number of samples.
+
+# max_simultaneous_samples = -1
+
 
 ### Game options ###
 
@@ -234,13 +253,36 @@
 
 # startup_editor = 1
 
+# Enable standalone mode. This is a game mode meant to be used
+# for packaged standalone MegaZeux games. In standalone mode:
+# - ENTER_MENU, ESCAPE_MENU, HELP_MENU, F2_MENU and LOAD_MENU
+#   can be used on the title screen to disable these menus.
+# - HELP_MENU prevents the help menu from being opened even
+#   when other builtin dialogs are open
+# - EXIT_GAME can be used on the title screen to exit MegaZeux
+# - The default title screen message does not appear
+# - PLAY_GAME can be set to 1 to start a game 
+# - Using ALT-F4, closing the window or using other OS-specific
+#   ways of closing an application will exit MZX entirely,
+#   without asking for confirmation first
+# Standalone mode can only be used from MZXRun.
+
+# standalone_mode = 1
+
+# Enable no titlescreen mode. This mode only works if standalone
+# mode is enabled and causes the following:
+# - The title screen is skipped and the game begins on the first
+#   board.
+# - Exiting to the title screen exits MegaZeux
+
+# no_titlescreen = 1
 
 ### Board editor options ###
 
 # Whether or not the spacebar can be used to toggle between
 # your active buffer and the meta character "SPACE". If you
-# set this, it will behave like older MegaZeux's, but it will
-# allow you to overwrite robots, for instance.
+# set this, it will behave like older MegaZeux versions, but it
+# will allow you to overwrite robots, for instance.
 #
 # If the setting is disabled (the default), replacing params
 # will your new buffer will not require a toggle, and robots
@@ -249,10 +291,20 @@
 # editor_space_toggles = 1
 
 # Whether or not the editor should center the viewport on the
-# cursor in tab draw mode. Enabled by default, uncomment the
-# following line to disable.
+# cursor in tab draw mode. Disabled by default; uncomment the
+# following line to enable.
 
-# editor_tab_focuses_view = 0
+# editor_tab_focuses_view = 1
+
+# Whether or not the editor will load board char sets and
+# palettes when the board is changed. Disabled by default.
+
+# editor_load_board_assets = 1
+
+# Whether or not the thing menus (F3-F10) will place an object on
+# the board when that object is selected. Enabled by default.
+
+# editor_thing_menu_places = 1
 
 # If this is set to 1 (the default), enter can be used to split
 # a line in the robot editor. However, the classic behaviour is
@@ -261,17 +313,20 @@
 
 # editor_enter_splits = 1
 
-# Set to 1 if you want the board editor to not show the hotkey
-# help by default.
+# Set to 0 if you want the board editor to show the hotkey help
+# by default.
 
 # board_editor_hide_help = 1
 
-# The length of the char editor undo history. Each step of the
-# history stores the whole char set, so it may be wise to use a
-# lower number here on memory-scarce platforms. Please note that
-# the current step is part of the history. Defaults to 10.
+# Set to 1 if you want the palette editor to hide the hotkey help
+# when MegaZeux starts (default: don't hide).
 
-# undo_history_size = 10
+# palette_editor_hide_help = 0
+
+# The size of the board, overlay, vlayer, and char editor undo history
+# stacks. Valid values are between 0 and 1000. Defaults to 100.
+
+# undo_history_size = 100
 
 # Defaults for new boards. Put these in [filename].editor.cnf to customize
 # for each individual game, E.G. caverns.editor.cnf.  Viewport width/height
@@ -299,6 +354,7 @@
 # board_default_forest_to_floor = 0
 # board_default_collect_bombs = 0
 # board_default_restart_if_hurt = 0
+# board_default_reset_on_entry = 0
 # board_default_player_locked_ns = 0
 # board_default_player_locked_ew = 0
 # board_default_player_locked_att = 0
@@ -306,6 +362,8 @@
 # board_default_explosions_leave = ash
 # board_default_saving = enabled
 # board_default_overlay = enabled
+# board_default_charset_path = 
+# board_default_palette_path = 
 
 
 ### Robot editor options ###
@@ -393,10 +451,10 @@
 
 # robot_editor_default_palette = 0
 
-# Set to 1 if you want the robot editor to not show the hotkey
-# help and horizontal border by default.
+# Set to 0 if you want the robot editor to show the hotkey help
+# and horizontal border by default.
 
-# robot_editor_hide_help = 0
+# robot_editor_hide_help = 1
 
 
 # Backup options
@@ -439,8 +497,8 @@
 # to experiment to find which joystick is which number, if you have
 # multiple ones, otherwise just use 1. Up to 16 joysticks are
 # recognized.
-# You can currently map two things, axes and buttons.
-# Axes/buttons are mapped to keys given by number. You can find out
+# You can currently map three things, axes, buttons, and POV hats.
+# Axes/buttons/hats are mapped to keys given by number. You can find out
 # a key's number by printing key_pressed in a loop (NOT key_code).
 # Axis mapping looks as follows:
 
@@ -458,6 +516,14 @@
 # Where X is the number of the joystick, Y is the number of the button
 # (you may have to experiment to find out which button is which number),
 # and A is the key whose press is emulated when this button is pressed.
+
+# Hat mapping looks as follows:
+
+# joyXhat = U, D, L, R
+
+# Where X is the number of the joystick, U is the key for the up direction,
+# D is the key for the down direction, L is the key for the left direction,
+# and R is the key for the right direction.
 
 
 # Misc Options
@@ -504,10 +570,11 @@
 # URL and should not contain protocol specifiers such as http://
 
 # By default, MZX will attempt to connect to updates.digitalmzx.net,
-# followed by updates.mzx.devzero.co.uk.
+# followed by updates.megazeux.org and updates.megazeux.net.
 
 # update_host = updates.digitalmzx.net
-# update_host = updates.mzx.devzero.co.uk
+# update_host = updates.megazeux.org
+# update_host = updates.megazeux.net
 
 # The update "branch" is consulted each time the updater runs. Typically,
 # there are only two branches, "Stable" and "Unstable". Please note, this
@@ -517,5 +584,13 @@
 # change this to "Unstable". Third parties may use different branch names.
 
 # update_branch_pin = Stable
+
+# By default, MZX will check for updates on startup. There are three modes:
+# "on", which will display most messages; "silent", which will only display
+# certain errors and a message in the window caption; and "off", which disables
+# this feature altogether. The default setting is "silent". If you start MZX
+# in fullscreen, "on" is recommended.
+
+# update_auto_check = silent
 
 include pad.config

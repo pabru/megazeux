@@ -68,18 +68,18 @@ void initialize_joysticks(void)
   // stub
 }
 
-Uint32 __update_event_status(void)
+bool __update_event_status(void)
 {
   // stub
   return 0;
 }
 
-void real_warp_mouse(Uint32 x, Uint32 y)
+void real_warp_mouse(int x, int y)
 {
   // stub
 }
 
-void __wait_event(void)
+void __wait_event(int timeout)
 {
   // stub
 }

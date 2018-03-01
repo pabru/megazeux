@@ -151,7 +151,8 @@ int main(int argc, char *argv[])
         int link;
 
         // Get upcoming link
-        fscanf(source, "%3d", &link);
+        if(!fscanf(source, "%3d", &link))
+          break;
 
         // Get next char
         current_char = fgetc(source);
@@ -214,6 +215,8 @@ int main(int argc, char *argv[])
         file_len += 2;
         // we can't stop here this is bat country
       }
+
+      /* fallthrough */
 
 
 
@@ -364,6 +367,9 @@ int main(int argc, char *argv[])
         save_last_file:
         end_of_file = 1;
       }
+
+      /* fallthrough */
+
       // New file
       case '#':
       {

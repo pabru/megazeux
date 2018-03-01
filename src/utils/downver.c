@@ -20,6 +20,7 @@
  * to make the tool easy to use for newbies (simply drag and drop).
  *
  * Copyright (C) 2008-2009 Alistair John Strachan <alistair@devzero.co.uk>
+ * Copyright (C) 2017 Alice Rowan <petrifiedrowan@gmail.com>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
@@ -43,27 +44,20 @@
 #endif
 
 #define SKIP_SDL
-#include "world.h"
-#include "util.h"
+#include "../memfile.h"
+#include "../util.h"
+#include "../world.h"
+#include "../world_prop.h"
+#include "../zip.h"
 
-#define error(...) \
-  { \
-    fprintf(stderr, __VA_ARGS__); \
-    fflush(stderr); \
-  }
+#define DOWNVER_VERSION "2.91"
+#define DOWNVER_EXT ".290"
 
-#define WORLD_VERSION_HI ((WORLD_VERSION >> 8) & 0xff)
-#define WORLD_VERSION_LO (WORLD_VERSION & 0xff)
+#define MZX_VERSION_HI ((MZX_VERSION >> 8) & 0xff)
+#define MZX_VERSION_LO (MZX_VERSION & 0xff)
 
-#define WORLD_VERSION_PREV_HI ((WORLD_VERSION_PREV >> 8) & 0xff)
-#define WORLD_VERSION_PREV_LO (WORLD_VERSION_PREV & 0xff)
-
-#if WORLD_VERSION == 0x0254
-
-/* Suppress a couple of annoying warnings
-#define WORLD_GLOBAL_OFFSET_OFFSET 4230
-#define MAX_BOARDS                 250
-*/
+#define MZX_VERSION_PREV_HI ((MZX_VERSION_PREV >> 8) & 0xff)
+#define MZX_VERSION_PREV_LO (MZX_VERSION_PREV & 0xff)
 
 enum status
 {
@@ -73,59 +67,202 @@ enum status
   SEEK_ERROR,
 };
 
-/* Commenting out some useful stuff to leave around
-static struct board_entry
-{
-  unsigned int size;
-  unsigned int offset;
-}
-board_list[MAX_BOARDS];
+// MegaZeux's obtuse architecture requires this for the time being.
+// This function is used in out_of_memory_check (util.c), and check alloc
+// is required by zip.c (as it should be).
 
-static unsigned short fgetus(FILE *fp)
+int error(const char *message, unsigned int a, unsigned int b, unsigned int c)
 {
-  return (fgetc(fp) << 0) | (fgetc(fp) << 8);
+  fprintf(stderr, "%s\n", message);
+  exit(-1);
 }
 
-static unsigned int fgetud(FILE *fp)
+#define error(...) \
+  { \
+    fprintf(stderr, __VA_ARGS__); \
+    fflush(stderr); \
+  }
+
+static inline void save_prop_p(int ident, struct memfile *prop,
+ struct memfile *mf)
 {
-  return (fgetc(fp) << 0)  | (fgetc(fp) << 8) |
-         (fgetc(fp) << 16) | (fgetc(fp) << 24);
+  save_prop_s(ident, prop->start, (prop->end - prop->start), 1, mf);
 }
 
-static void fputus(unsigned short src, FILE *fp)
+static enum zip_error zip_duplicate_file(struct zip_archive *dest,
+ struct zip_archive *src, void (*handler)(struct memfile *, struct memfile *))
 {
-  fputc(src & 0xFF, fp);
-  fputc(src >> 8, fp);
+  enum zip_error result;
+  unsigned int method;
+  char name[9];
+  void *buffer;
+  size_t actual_size;
+
+  result = zip_get_next_name(src, name, 9);
+  if(result)
+    return result;
+
+  result = zip_get_next_method(src, &method);
+  if(result)
+    return result;
+
+  result = zip_get_next_uncompressed_size(src, &actual_size);
+  if(result)
+    return result;
+
+  buffer = malloc(actual_size);
+
+  result = zip_read_file(src, buffer, actual_size, &actual_size);
+  if(result)
+    goto err_free;
+
+  if(handler)
+  {
+    struct memfile mf_in;
+    struct memfile mf_out;
+    void *buffer2 = malloc(actual_size);
+
+    mfopen_static(buffer, actual_size, &mf_in);
+    mfopen_static(buffer2, actual_size, &mf_out);
+
+    handler(&mf_out, &mf_in);
+
+    // Free the old buffer, then refresh with the new buffer
+    free(buffer);
+    mfsync(&buffer, &actual_size, &mf_out);
+  }
+
+  result = zip_write_file(dest, name, buffer, actual_size, (int)method);
+
+err_free:
+  free(buffer);
+  return result;
 }
 
-static void fputud(unsigned int src, FILE *fp)
+static void convert_291_to_290_world_info(struct memfile *dest,
+ struct memfile *src)
 {
-  fputc(src & 0xFF, fp);
-  fputc((src >> 8) & 0xFF, fp);
-  fputc((src >> 16) & 0xFF, fp);
-  fputc((src >> 24) & 0xFF, fp);
-}
-*/
+  struct memfile prop;
+  int ident;
+  int len;
 
-static enum status convert_284_to_283_board(FILE *fp, int *delta)
+  while(next_prop(&prop, &ident, &len, src))
+  {
+    switch(ident)
+    {
+      case WPROP_SMZX_MODE:
+      case WPROP_VLAYER_WIDTH:
+      case WPROP_VLAYER_HEIGHT:
+      case WPROP_VLAYER_SIZE:
+        // 2.90 doesn't use these.
+        break;
+
+      case WPROP_WORLD_VERSION:
+      case WPROP_FILE_VERSION:
+        // Replace the version number
+        save_prop_w(ident, MZX_VERSION_PREV, dest);
+        break;
+
+      default:
+        save_prop_p(ident, &prop, dest);
+        break;
+    }
+  }
+
+  save_prop_eof(dest);
+  mfresize(mftell(dest), dest);
+}
+
+static void convert_291_to_290_board_info(struct memfile *dest,
+ struct memfile *src)
 {
-  //well, that was easy!!
+  struct memfile prop;
+  int ident;
+  int len;
+
+  while(next_prop(&prop, &ident, &len, src))
+  {
+    switch(ident)
+    {
+      case BPROP_FILE_VERSION:
+        // Replace the version number
+        save_prop_w(ident, MZX_VERSION_PREV, dest);
+        break;
+
+      default:
+        save_prop_p(ident, &prop, dest);
+        break;
+    }
+  }
+
+  save_prop_eof(dest);
+  mfresize(mftell(dest), dest);
+}
+
+static enum status convert_291_to_290(FILE *out, FILE *in)
+{
+  struct zip_archive *inZ = zip_open_fp_read(in);
+  struct zip_archive *outZ = zip_open_fp_write(out);
+  enum zip_error err = ZIP_SUCCESS;
+  unsigned int file_id;
+  unsigned int board_id;
+  unsigned int robot_id;
+
+  zip_read_directory(inZ);
+  assign_fprops(inZ, 0);
+
+  while(ZIP_SUCCESS == zip_get_next_prop(inZ, &file_id, &board_id, &robot_id))
+  {
+    switch(file_id)
+    {
+      case FPROP_WORLD_PAL_INDEX:
+      case FPROP_WORLD_VCO:
+      case FPROP_WORLD_VCH:
+        // 2.90 doesn't use these files.
+        zip_skip_file(inZ);
+        break;
+
+      case FPROP_WORLD_INFO:
+        err = zip_duplicate_file(outZ, inZ, convert_291_to_290_world_info);
+        break;
+
+      case FPROP_BOARD_INFO:
+        err = zip_duplicate_file(outZ, inZ, convert_291_to_290_board_info);
+        break;
+
+      default:
+        err = zip_duplicate_file(outZ, inZ, NULL);
+        break;
+    }
+
+    if(err != ZIP_SUCCESS)
+    {
+      // Skip files that don't work
+      zip_skip_file(inZ);
+      err = ZIP_SUCCESS;
+    }
+  }
+
+  zip_close(inZ, NULL);
+  zip_close(outZ, NULL);
   return SUCCESS;
 }
-
-static enum status convert_284_to_283(FILE *fp)
-{
-  //no changes in format
-  return SUCCESS;
-}
-
-#endif // WORLD_VERSION == 0x0254
 
 int main(int argc, char *argv[])
 {
-  int world, byte;
+  char fname[MAX_PATH + 4];
+  enum status ret;
   long ext_pos;
-  FILE *fp;
+  int world;
+  int byte;
+  FILE *in;
+  FILE *out;
+
+  if(strcmp(VERSION, DOWNVER_VERSION) < 0)
+  {
+    error("[ERROR] Update downver for " VERSION "!\n");
+    return 1;
+  }
 
   if(argc <= 1)
   {
@@ -142,10 +279,14 @@ int main(int argc, char *argv[])
 
   if(!strcasecmp(argv[1] + ext_pos, ".mzb"))
   {
+    strcpy(fname, argv[1]);
+    strcpy(fname + ext_pos, DOWNVER_EXT ".mzb");
     world = false;
   }
   else if(!strcasecmp(argv[1] + ext_pos, ".mzx"))
   {
+    strcpy(fname, argv[1]);
+    strcpy(fname + ext_pos, DOWNVER_EXT ".mzx");
     world = true;
   }
   else
@@ -154,10 +295,18 @@ int main(int argc, char *argv[])
     goto exit_out;
   }
 
-  fp = fopen_unsafe(argv[1], "r+b");
-  if(!fp)
+  in = fopen_unsafe(argv[1], "rb");
+  if(!in)
   {
-    error("Could not open '%s' for read/write.\n", argv[1]);
+    error("Could not open '%s' for read.\n", argv[1]);
+    goto exit_out;
+  }
+
+  out = fopen_unsafe(fname, "wb");
+  if(!out)
+  {
+    error("Could not open '%s' for write.\n", fname);
+    fclose(in);
     goto exit_out;
   }
 
@@ -165,106 +314,131 @@ int main(int argc, char *argv[])
    * can theoretically be encrypted, though practically this will not happen
    * with modern worlds. Just in case, check for it and abort.
    *
-   * Board files just need the 0xFF byte at the start skipping.
+   * Board files just need the 0xFF byte at the start skipped.
    */
   if(world)
   {
     char name[BOARD_NAME_SIZE];
-    size_t fret;
+    size_t len;
 
-    // Last selected board name; junked, we simply don't care
-    fret = fread(name, BOARD_NAME_SIZE, 1, fp);
-    if(fret != 1)
+    // Duplicate the world name
+    len = fread(name, BOARD_NAME_SIZE, 1, in);
+    if(len != 1)
       goto err_read;
+
+    len = fwrite(name, BOARD_NAME_SIZE, 1, out);
+    if(len != 1)
+      goto err_write;
 
     // Check protection isn't enabled
-    byte = fgetc(fp);
+    byte = fgetc(in);
     if(byte < 0)
+    {
       goto err_read;
-    else if(byte != 0)
+    }
+    else
+    if(byte != 0)
     {
       error("Protected worlds are not supported.\n");
       goto exit_close;
     }
+    fputc(0, out);
   }
   else
   {
-    byte = fgetc(fp);
+    byte = fgetc(in);
     if(byte < 0)
+    {
       goto err_read;
-    else if(byte != 0xff)
+    }
+    else
+    if(byte != 0xFF)
+    {
       error("Board file is corrupt or unsupported.\n");
+      goto exit_close;
+    }
+    fputc(0xFF, out);
   }
 
   // Validate version is current
 
-  byte = fgetc(fp);
+  byte = fgetc(in);
   if(byte < 0)
+  {
     goto err_read;
-  else if(byte != 'M')
+  }
+  else
+  if(byte != 'M')
   {
     error("World file is corrupt or unsupported.\n");
     goto exit_close;
   }
 
-  byte = fgetc(fp);
+  byte = fgetc(in);
   if(byte < 0)
+  {
     goto err_read;
-  else if(byte != WORLD_VERSION_HI)
+  }
+  else
+  if(byte != MZX_VERSION_HI)
   {
     error("This tool only supports worlds or boards from %d.%d.\n",
-     WORLD_VERSION_HI, WORLD_VERSION_LO);
+     MZX_VERSION_HI, MZX_VERSION_LO);
     goto exit_close;
   }
 
-  byte = fgetc(fp);
+  byte = fgetc(in);
   if(byte < 0)
+  {
     goto err_read;
-  else if(byte != WORLD_VERSION_LO)
+  }
+  else
+  if(byte != MZX_VERSION_LO)
   {
     error("This tool only supports worlds or boards from %d.%d.\n",
-     WORLD_VERSION_HI, WORLD_VERSION_LO);
+     MZX_VERSION_HI, MZX_VERSION_LO);
     goto exit_close;
   }
 
-  // Re-write current magic with previous version's magic
+  // Write previous version's magic
 
-  if(fseek(fp, -2, SEEK_CUR) != 0)
-    goto err_seek;
+  fputc('M', out);
 
-  byte = fputc(WORLD_VERSION_PREV_HI, fp);
+  byte = fputc(MZX_VERSION_PREV_HI, out);
   if(byte == EOF)
     goto err_write;
 
-  byte = fputc(WORLD_VERSION_PREV_LO, fp);
+  byte = fputc(MZX_VERSION_PREV_LO, out);
   if(byte == EOF)
     goto err_write;
 
-#if WORLD_VERSION == 0x0254
+  // Worlds and boards are the same from here out.
+  // Conversion closes the file pointers, so NULL them.
+
+  ret = convert_291_to_290(out, in);
+  out = NULL;
+  in = NULL;
+
+  switch(ret)
   {
-    enum status ret;
-
-    if(world)
-      ret = convert_284_to_283(fp);
-    else
-      ret = convert_284_to_283_board(fp, NULL);
-
-    switch(ret)
-    {
-      case SEEK_ERROR:  goto err_seek;
-      case READ_ERROR:  goto err_read;
-      case WRITE_ERROR: goto err_write;
-      case SUCCESS:     break;
-    }
+    case SEEK_ERROR:  goto err_seek;
+    case READ_ERROR:  goto err_read;
+    case WRITE_ERROR: goto err_write;
+    case SUCCESS:     break;
   }
-#endif
 
-  fprintf(stdout, "File '%s' successfully downgraded from %d.%d to %d.%d.\n",
-   argv[1], WORLD_VERSION_HI, WORLD_VERSION_LO,
-   WORLD_VERSION_PREV_HI, WORLD_VERSION_PREV_LO);
+  fprintf(stdout,
+   "File '%s' successfully downgraded from %d.%d to %d.%d.\n"
+   "Saved to '%s'.\n",
+   argv[1], MZX_VERSION_HI, MZX_VERSION_LO,
+   MZX_VERSION_PREV_HI, MZX_VERSION_PREV_LO, fname);
 
 exit_close:
-  fclose(fp);
+  if(out)
+    fclose(out);
+  if(in)
+    fclose(in);
+
 exit_out:
   return 0;
 

@@ -37,6 +37,12 @@ __M_BEGIN_DECLS
 #include "sfx.h"
 #include "util.h"
 
+#define CHANGE_STATE_SWAP_WORLD 1
+#define CHANGE_STATE_LOAD_GAME_ROBOTIC 2
+#define CHANGE_STATE_EXIT_GAME_ROBOTIC 3
+#define CHANGE_STATE_PLAY_GAME_ROBOTIC 4
+#define CHANGE_STATE_REQUEST_EXIT 5
+
 struct world
 {
   // 0 if a world has been loaded, 1 if it hasn't
@@ -70,6 +76,8 @@ struct world
   int scroll_title_color;
   int scroll_arrow_color;
   char real_mod_playing[MAX_PATH];
+  int max_samples;
+  int smzx_message;
 
   int edge_color;
   int first_board;
@@ -118,7 +126,10 @@ struct world
   FILE *input_file;
   bool input_is_dir;
   struct mzx_dir input_directory;
+  int temp_input_pos;
+  int temp_output_pos;
   int commands;
+  int commands_stop;
   int vlayer_size;
   int vlayer_width;
   int vlayer_height;
@@ -130,11 +141,12 @@ struct world
   struct board **board_list;
   struct board *current_board;
   int current_board_id;
+  int temporary_board;
 
   struct robot global_robot;
 
   int custom_sfx_on;
-  char custom_sfx[NUM_SFX * 69];
+  char custom_sfx[NUM_SFX * SFX_SIZE];
 
   // Not part of world/save files, but runtime globals
   int player_x;
@@ -178,13 +190,15 @@ struct world
   // counters. It should normally be set to FOPEN_NONE.
   enum special_counter_return special_counter_return;
 
-  // Indicates if a robot swapped the world
-  int swapped;
+  // These are used to handle SAVE_GAME
+  enum { SAVE_NONE, SAVE_GAME } robotic_save_type;
+  char robotic_save_path[MAX_PATH];
+
+  // Indicates a robotic world swap, savegame load, or game exit
+  int change_game_state;
 
   // Current speed of MZX world
   int mzx_speed;
-  // Default speed (as loaded by config file)
-  int default_speed;
   // If we can change the speed from the F2 menu.
   int lock_speed;
 
@@ -193,7 +207,12 @@ struct world
 #ifdef CONFIG_EDITOR
   struct editor_config_info editor_conf;
   struct editor_config_info editor_conf_backup;
+  bool editing;
 #endif
+
+  // World validation: we don't want to alloc this file twice.
+  char *raw_world_info;
+  int raw_world_info_size;
 
   // Keep this open, just once
   FILE *help_file;
@@ -201,6 +220,8 @@ struct world
   // An array for game2.cpp
   char *update_done;
   int update_done_size;
+  // Are we exiting all the way out of MZX?
+  bool full_exit;
 };
 
 __M_END_DECLS

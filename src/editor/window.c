@@ -35,9 +35,7 @@
 
 #define check_on "[\xFB]"
 #define check_off "[ ]"
-#define color_blank ' '
-#define color_wild '\x3F'
-#define color_dot '\xFE'
+#define char_custom '\x3F'
 
 //Foreground colors that look nice for each background color
 static const char fg_per_bk[16] =
@@ -66,6 +64,7 @@ static const char fg_per_bk[16] =
 int list_menu(const char *const *choices, int choice_size, const char *title,
  int current, int num_choices, int xpos, int ypos)
 {
+  int exit;
   char key_buffer[64];
   int mouse_press;
   int key_position = 0;
@@ -147,7 +146,9 @@ int list_menu(const char *const *choices, int choice_size, const char *title,
     update_event_status_delay();
 
     // Act upon it
-    key = get_key(keycode_internal);
+    key = get_key(keycode_internal_wrt_numlock);
+
+    exit = get_exit_status();
 
     mouse_press = get_mouse_press_ext();
 
@@ -215,12 +216,8 @@ int list_menu(const char *const *choices, int choice_size, const char *title,
     {
       case IKEY_ESCAPE:
       {
-        // ESC
-        restore_screen();
-        if(current == 0)
-          return -32767;
-        else
-          return -current;
+          exit = 1;
+          break;
       }
 
       case IKEY_BACKSPACE:
@@ -339,13 +336,19 @@ int list_menu(const char *const *choices, int choice_size, const char *title,
         break;
       }
     }
+
+    // Exit event or Escape
+    if(exit)
+    {
+      restore_screen();
+      if(current == 0)
+        return -32767;
+      else
+        return -current;
+    }
+
   } while(1);
 }
-
-// For color selection screen
-
-#define color_sel_char '\xFE'
-#define color_sel_wild '\x3F'
 
 // Color selection screen colors- see char selection screen.
 
@@ -363,12 +366,16 @@ int color_selection(int current, int allow_wild)
   int key;
   int selected;
   int currx, curry;
+  int last_keypress_time = 0;
+  int last_input = 0;
+
+  char palette_char = get_screen_mode() ? CHAR_PAL_SMZX : CHAR_PAL_REG;
 
   // Save screen
   save_screen();
 
-  if(context == 72)
-    set_context(98);
+  if(context == CTX_MAIN)
+    set_context(CTX_DIALOG_BOX);
   else
     set_context(context);
 
@@ -419,34 +426,38 @@ int color_selection(int current, int allow_wild)
     // Draw outer edge
     draw_window_box(14, 3, 31 + allow_wild, 20 + allow_wild,
      DI_DARK, DI_MAIN, DI_CORNER, 0, 0);
-    // Draw colors
-    for(y = 0; y < 16 + allow_wild; y++)
-    {
-      for(x = 0; x < 16 + allow_wild; x++)
-      {
-        if(x == 16)
-        {
-          if(y == 16)
-            draw_char_ext(color_sel_wild, 135, 31, 20, 256, 0);
-          else
-            draw_char_ext(color_sel_wild, fg_per_bk[y] + y * 16,
-             31, y + 4, 256, 0);
-        }
-        else
 
-        if(y == 16)
-        {
-          if(x == 0)
-            draw_char_ext(color_sel_wild, 128, 15, 20, 256, 0);
-          else
-            draw_char_ext(color_sel_wild, x, x + 15, 20, 256, 0);
-        }
-        else
-        {
-          draw_char_ext(color_sel_char, x + (y * 16), x + 15,
-           y + 4, 256, 0);
-        }
-      }
+    // Clear place for main palette
+    for(y = 0; y < 16; y++)
+      for(x = 0; x < 16; x++)
+        erase_char(x + 15, y + 4);
+
+    select_layer(OVERLAY_LAYER);
+
+    // Draw main palette
+    for(y = 0; y < 16; y++)
+      for(x = 0; x < 16; x++)
+        draw_char_ext(palette_char, x + (y * 16), x + 15, y + 4, PRO_CH, 0);
+
+    select_layer(UI_LAYER);
+
+    // Draw wildcards
+    if(allow_wild)
+    {
+      int wild_pal = get_screen_mode() ? 16 : 0;
+
+      for(x = 1, y = 16; x < 16; x++)
+        draw_char_ext(CHAR_PAL_WILD, x, x + 15, 20, PRO_CH, wild_pal);
+
+      for(y = 0, x = 16; y < 16; y++)
+        draw_char_ext(CHAR_PAL_WILD, fg_per_bk[y] + y * 16,
+         31, y + 4, PRO_CH, wild_pal);
+
+      // x = 0, y = 16
+      draw_char_ext(CHAR_PAL_WILD, 128, 15, 20, PRO_CH, wild_pal);
+
+      // x = 16, y = 16
+      draw_char_ext(CHAR_PAL_WILD, 135, 31, 20, PRO_CH, wild_pal);
     }
 
     // Add selection box
@@ -480,7 +491,11 @@ int color_selection(int current, int allow_wild)
     // Get key
 
     update_event_status_delay();
-    key = get_key(keycode_internal);
+    key = get_key(keycode_internal_wrt_numlock);
+
+    // Exit event -- mimic Escape
+    if(get_exit_status())
+      key = IKEY_ESCAPE;
 
     if(get_mouse_press())
     {
@@ -595,6 +610,46 @@ int color_selection(int current, int allow_wild)
 
       default:
       {
+        int value = -1;
+
+        if(key >= IKEY_0 && key <= IKEY_9)
+        {
+          value = key - IKEY_0;
+        }
+        else
+
+        if(key >= IKEY_a && key <= IKEY_f)
+        {
+          value = 10 + (key - IKEY_a);
+        }
+
+        if(key == IKEY_SLASH && allow_wild)
+          value = 16;
+
+        if(value >= 0)
+        {
+          int ticks = get_ticks();
+          if(ticks - last_keypress_time >= TIME_SUSPEND)
+          {
+            last_input = 0;
+            currx = 0;
+            curry = 0;
+          }
+
+          switch(last_input)
+          {
+            case 0:
+              curry = value;
+              break;
+
+            case 1:
+              currx = value;
+              break;
+          }
+
+          last_keypress_time = ticks;
+          last_input++;
+        }
         break;
       }
     }
@@ -604,6 +659,8 @@ int color_selection(int current, int allow_wild)
 // Short function to display a color as a colored box
 void draw_color_box(int color, int q_bit, int x, int y, int x_limit)
 {
+  char palette_char = get_screen_mode() ? CHAR_PAL_SMZX : CHAR_PAL_REG;
+
   // If q_bit is set, there are unknowns
   if(q_bit)
   {
@@ -615,13 +672,13 @@ void draw_color_box(int color, int q_bit, int x, int y, int x_limit)
         color = 8;
 
       if(x < x_limit)
-        draw_char_ext(color_wild, color, x, y, 256, 0);
+        draw_char_ext(CHAR_PAL_WILD, color, x, y, PRO_CH, 0);
 
       if(x + 1 < x_limit)
-        draw_char_ext(color_dot, color, x + 1, y, 256, 0);
+        draw_char_ext(CHAR_PAL_REG, color, x + 1, y, PRO_CH, 0);
 
       if(x + 2 < x_limit)
-        draw_char_ext(color_wild, color, x + 2, y, 256, 0);
+        draw_char_ext(CHAR_PAL_WILD, color, x + 2, y, PRO_CH, 0);
     }
     else
 
@@ -633,37 +690,56 @@ void draw_color_box(int color, int q_bit, int x, int y, int x_limit)
       color = (color << 4) + fg_per_bk[color];
 
       if(x < x_limit)
-        draw_char_ext(color_wild, color, x, y, 256, 0);
+        draw_char_ext(CHAR_PAL_WILD, color, x, y, PRO_CH, 0);
 
       if(x + 1 < x_limit)
-        draw_char_ext(color_wild, color, x + 1, y, 256, 0);
+        draw_char_ext(CHAR_PAL_WILD, color, x + 1, y, PRO_CH, 0);
 
       if(x + 2 < x_limit)
-        draw_char_ext(color_wild, color, x + 2, y, 256, 0);
+        draw_char_ext(CHAR_PAL_WILD, color, x + 2, y, PRO_CH, 0);
     }
     else
     {
       // Both unknown
       if(x < x_limit)
-        draw_char(color_wild, 8, x, y);
+        draw_char(CHAR_PAL_WILD, 8, x, y);
 
       if(x + 1 < x_limit)
-        draw_char(color_wild, 135, x + 1, y);
+        draw_char(CHAR_PAL_WILD, 135, x + 1, y);
 
       if(x + 2 < x_limit)
-        draw_char(color_wild, 127, x + 2, y);
+        draw_char(CHAR_PAL_WILD, 127, x + 2, y);
     }
   }
   else
   {
+    // To respect SMZX, this needs to draw on the overlay.
+    // If a color box is ever planned to be drawn NOT on the UI layer,
+    // this needs to change.
+
     if(x < x_limit)
-      draw_char_ext(color_blank, color, x, y, 256, 0);
+    {
+      erase_char(x, y);
+      select_layer(OVERLAY_LAYER);
+      draw_char_ext(0, color, x, y, PRO_CH, 0);
+      select_layer(UI_LAYER);
+    }
 
     if(x + 1 < x_limit)
-      draw_char_ext(color_dot, color, x + 1, y, 256, 0);
+    {
+      erase_char(x+1, y);
+      select_layer(OVERLAY_LAYER);
+      draw_char_ext(palette_char, color, x + 1, y, PRO_CH, 0);
+      select_layer(UI_LAYER);
+    }
 
     if(x + 2 < x_limit)
-      draw_char_ext(color_blank, color, x + 2, y, 256, 0);
+    {
+      erase_char(x+2, y);
+      select_layer(OVERLAY_LAYER);
+      draw_char_ext(0, color, x + 2, y, PRO_CH, 0);
+      select_layer(UI_LAYER);
+    }
   }
 }
 
@@ -697,15 +773,28 @@ static void draw_char_box(struct world *mzx_world, struct dialog *di,
  struct element *e, int color, int active)
 {
   struct char_box *src = (struct char_box *)e;
+  unsigned char result = *(src->result);
   int x = di->x + e->x;
   int y = di->y + e->y;
   int question_len = (int)strlen(src->question) + di->pad_space;
 
   write_string(src->question, x, y, color, 0);
-  draw_char_ext(*(src->result), DI_CHAR,
-   x + question_len + 1, y, 0, 16);
-  draw_char(' ', DI_CHAR, x + question_len, y);
-  draw_char(' ', DI_CHAR, x + question_len + 2, y);
+
+  // Special case: display for char ID value 255 custom behavior
+  if((result == 255) && !(src->allow_char_255))
+  {
+    draw_char(char_custom, 0x05, x + question_len + 0, y);
+    draw_char(char_custom, 0x0D, x + question_len + 1, y);
+    draw_char(char_custom, 0x05, x + question_len + 2, y);
+  }
+
+  else
+  {
+    draw_char_ext(*(src->result), DI_CHAR,
+     x + question_len + 1, y, 0, 16);
+    draw_char(' ', DI_CHAR, x + question_len, y);
+    draw_char(' ', DI_CHAR, x + question_len + 2, y);
+  }
 }
 
 static void draw_color_box_element(struct world *mzx_world, struct dialog *di,
@@ -820,11 +909,16 @@ static int key_char_box(struct world *mzx_world, struct dialog *di,
     case IKEY_RETURN:
     {
       int current_char =
-       char_selection(*(src->result));
+       char_selection_ext(*(src->result), src->allow_char_255,
+        NULL, NULL, NULL, -1);
 
-      if((current_char == 255) && !(src->allow_char_255) &&
-       confirm(mzx_world, "CHAR IDs <128 set to 255 use their param as their char."))
-        current_char = -1; //don't change the char if the user cancels.
+      if((current_char == 255) && !(src->allow_char_255))
+      {
+        // Don't change the char if the user cancels.
+        if(confirm(mzx_world,
+         "Use param for the char of this type (like CustomBlock)?"))
+          current_char = -1;
+      }
 
       if(current_char >= 0)
         *(src->result) = current_char;
@@ -930,6 +1024,13 @@ static int click_color_box(struct world *mzx_world, struct dialog *di,
   return IKEY_RETURN;
 }
 
+static int click_board_list(struct world *mzx_world, struct dialog *di,
+ struct element *e, int mouse_button, int mouse_x, int mouse_y,
+ int new_active)
+{
+  return IKEY_RETURN;
+}
+
 struct element *construct_check_box(int x, int y, const char **choices,
  int num_choices, int max_length, int *results)
 {
@@ -972,13 +1073,6 @@ struct element *construct_color_box(int x, int y,
   return (struct element *)src;
 }
 
-static int click_board_list(struct world *mzx_world, struct dialog *di,
- struct element *e, int mouse_button, int mouse_x, int mouse_y,
- int new_active)
-{
-  return IKEY_RETURN;
-}
-
 struct element *construct_board_list(int x, int y,
  const char *title, int board_zero_as_none, int *result)
 {
@@ -1003,7 +1097,7 @@ int add_board(struct world *mzx_world, int current)
   write_string("Name for new board:", 18, 13, 78, 0);
   temp_board_str[0] = 0;
   if(intake(mzx_world, temp_board_str, BOARD_NAME_SIZE - 1,
-   38, 13, 15, 1, 0, NULL, 0, NULL) == IKEY_ESCAPE)
+   38, 13, 15, 1, 0, NULL, 0, NULL) == IKEY_ESCAPE || get_exit_status())
   {
     restore_screen();
     return -1;

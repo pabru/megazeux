@@ -2,7 +2,7 @@
  *
  * Copyright (C) 2004 Gilead Kutnick <exophase@adelphia.net>
  * Copyright (C) 2008 Alistair John Strachan <alistair@devzero.co.uk>
- * Copyright (C) 2012 Alice Lauren Rowan <petrifiedrowan@gmail.com>
+ * Copyright (C) 2012 Alice Rowan <petrifiedrowan@gmail.com>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
@@ -18,6 +18,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
+
 #include <sys/stat.h>
 #include <ctype.h>
 #include <time.h>
@@ -66,12 +67,13 @@ static struct mzx_resource mzx_res[] = {
 #endif
 #ifdef CONFIG_RENDER_GL_PROGRAM
 #define SHADERS ASSETS "shaders/"
+#define SCALERS SHADERS "scalers/"
+  { SCALERS,                       NULL, false },
   { SHADERS "scaler.vert",         NULL, false },
-  { SHADERS "scaler.frag",         NULL, false },
+  { SCALERS "semisoft.frag",       NULL, false },
   { SHADERS "tilemap.vert",        NULL, false },
   { SHADERS "tilemap.frag",        NULL, false },
-  { SHADERS "tilemap.smzx12.frag", NULL, false },
-  { SHADERS "tilemap.smzx3.frag",  NULL, false },
+  { SHADERS "tilemap.smzx.frag",   NULL, false },
   { SHADERS "mouse.vert",          NULL, false },
   { SHADERS "mouse.frag",          NULL, false },
   { SHADERS "cursor.vert",         NULL, false },
@@ -119,11 +121,14 @@ int mzx_res_init(const char *argv0, bool editor)
 {
   size_t i, bin_path_len = 0;
   struct stat file_info;
+  char *full_path_base;
+  char *full_path;
   char *bin_path;
   ssize_t g_ret;
   char *p_dir;
   int ret = 0;
 
+  full_path_base = cmalloc(MAX_PATH);
   bin_path = cmalloc(MAX_PATH);
   p_dir = cmalloc(MAX_PATH);
 
@@ -154,8 +159,8 @@ int mzx_res_init(const char *argv0, bool editor)
    */
   for(i = 0; i < END_RESOURCE_ID_T; i++)
   {
-    size_t p_dir_len, base_name_len = strlen(mzx_res[i].base_name);
-    char *full_path;
+    size_t base_name_len = strlen(mzx_res[i].base_name);
+    size_t p_dir_len;
 
     if(i == CONFIG_TXT)
       chdir(CONFDIR);
@@ -165,18 +170,20 @@ int mzx_res_init(const char *argv0, bool editor)
     getcwd(p_dir, MAX_PATH);
     p_dir_len = strlen(p_dir);
 
-    // since we can't add the path delimeter we should really fail hard
-    if(p_dir_len >= MAX_PATH)
+    // if we can't add the path we should really fail hard
+    if(p_dir_len + base_name_len + 1 >= MAX_PATH)
       continue;
 
     // append the trailing '/'
     p_dir[p_dir_len++] = '/';
     p_dir[p_dir_len] = 0;
 
-    full_path = cmalloc(p_dir_len + base_name_len + 1);
-    memcpy(full_path, p_dir, p_dir_len);
-    memcpy(full_path + p_dir_len, mzx_res[i].base_name, base_name_len);
-    full_path[p_dir_len + base_name_len] = 0;
+    memcpy(full_path_base, p_dir, p_dir_len);
+    memcpy(full_path_base + p_dir_len, mzx_res[i].base_name, base_name_len);
+    full_path_base[p_dir_len + base_name_len] = 0;
+
+    full_path = cmalloc(MAX_PATH);
+    clean_path_slashes(full_path_base, full_path, MAX_PATH);
 
     // Attempt to load it from this new path
     if(!stat(full_path, &file_info))
@@ -218,7 +225,7 @@ int mzx_res_init(const char *argv0, bool editor)
 
   free(p_dir);
   free(bin_path);
-
+  free(full_path_base);
   return ret;
 }
 
@@ -230,9 +237,98 @@ void mzx_res_free(void)
       free(mzx_res[i].path);
 }
 
+#ifdef USERCONFFILE
+#define COPY_BUFFER_SIZE  4096
+static unsigned char copy_buffer[COPY_BUFFER_SIZE];
+#endif
+
 char *mzx_res_get_by_id(enum resource_id id)
 {
+  #ifdef USERCONFFILE
+  static char userconfpath[MAX_PATH];
+  if (id == CONFIG_TXT)
+  {
+    FILE *fp;
+
+    // Special handling for CONFIG_TXT to allow for user
+    // configuration files
+    sprintf(userconfpath, "%s/%s", getenv("HOME"), USERCONFFILE);
+    
+    // Check if the file can be opened for reading
+    fp = fopen_unsafe(userconfpath, "rb");
+    
+    if (fp)
+    {
+      fclose(fp);
+      return (char *)userconfpath;
+    }
+    // Otherwise, try to open the file for writing
+    fp = fopen_unsafe(userconfpath, "wb");
+    if (fp)
+    {
+      FILE *original = fopen_unsafe(mzx_res[id].path, "rb");
+      if (original)
+      {
+        size_t bytes_read;
+        for (;;)
+        {
+          bytes_read = fread(copy_buffer, 1, COPY_BUFFER_SIZE, original);
+          if (bytes_read)
+            fwrite(copy_buffer, 1, bytes_read, fp);
+          else
+            break;
+        }
+        fclose(fp);
+        fclose(original);
+        return (char *)userconfpath;
+      }
+      fclose(fp);
+    }
+
+    // If that's no good, just read the normal config file
+  }
+  #endif /* USERCONFFILE */
   return mzx_res[id].path;
+}
+
+// Get 2 bytes, little endian
+
+int fgetw(FILE *fp)
+{
+  int a = fgetc(fp), b = fgetc(fp);
+  if((a == EOF) || (b == EOF))
+    return EOF;
+
+  return (b << 8) | a;
+}
+
+// Get 4 bytes, little endian
+
+int fgetd(FILE *fp)
+{
+  int a = fgetc(fp), b = fgetc(fp), c = fgetc(fp), d = fgetc(fp);
+  if((a == EOF) || (b == EOF) || (c == EOF) || (d == EOF))
+    return EOF;
+
+  return (d << 24) | (c << 16) | (b << 8) | a;
+}
+
+// Put 2 bytes, little endian
+
+void fputw(int src, FILE *fp)
+{
+  fputc(src & 0xFF, fp);
+  fputc(src >> 8, fp);
+}
+
+// Put 4 bytes, little endian
+
+void fputd(int src, FILE *fp)
+{
+  fputc(src & 0xFF, fp);
+  fputc((src >> 8) & 0xFF, fp);
+  fputc((src >> 16) & 0xFF, fp);
+  fputc((src >> 24) & 0xFF, fp);
 }
 
 // Determine file size of an open FILE and rewind it
@@ -250,19 +346,49 @@ long ftell_and_rewind(FILE *f)
 
 // Random function, returns an integer [0-range)
 
+static unsigned long long rng_state;
+
+// Seed the RNG from system time on startup
+void rng_seed_init(void)
+{
+  unsigned long long seed = (((unsigned long long)time(NULL)) << 32) | clock();
+  rng_set_seed(seed);
+}
+
+unsigned long long rng_get_seed(void)
+{
+  return rng_state;
+}
+
+void rng_set_seed(unsigned long long seed)
+{
+  rng_state = seed;
+}
+
+// xorshift*
+// Implementation from https://en.wikipedia.org/wiki/Xorshift
 unsigned int Random(unsigned long long range)
 {
-  static unsigned long long seed = 0;
-  unsigned long long value;
+	unsigned long long x = rng_state;
+  if (x == 0) x = 1;
+	x ^= x >> 12; // a
+	x ^= x << 25; // b
+	x ^= x >> 27; // c
+	rng_state = x;
+	return ((x * 0x2545F4914F6CDD1D) >> 32) * range / 0xFFFFFFFF;
+}
 
-  // If the seed is 0, initialise it with time and clock
-  if(seed == 0)
-    seed = time(NULL) + clock();
+// FIXME: This function should probably die. It's unsafe.
+void add_ext(char *src, const char *ext)
+{
+  size_t src_len = strlen(src);
+  size_t ext_len = strlen(ext);
 
-  seed = seed * 1664525 + 1013904223;
-
-  value = (seed & 0xFFFFFFFF) * range / 0xFFFFFFFF;
-  return (unsigned int)value;
+  if((src_len < ext_len) || (src[src_len - ext_len] != '.') ||
+   strcasecmp(src + src_len - ext_len, ext))
+  {
+    strncat(src, ext, ext_len);
+  }
 }
 
 __utils_maybe_static ssize_t __get_path(const char *file_name, char *dest,
@@ -293,6 +419,40 @@ ssize_t get_path(const char *file_name, char *dest, unsigned int buf_len)
   return __get_path(file_name, dest, buf_len);
 }
 
+static int isslash(char n)
+{
+  return n=='\\' || n=='/';
+}
+
+void clean_path_slashes(const char *src, char *dest, size_t buf_size)
+{
+  unsigned int i = 0;
+  unsigned int p = 0;
+  size_t src_len = strlen(src);
+
+  while((i < src_len) && (p < buf_size-1))
+  {
+    if(isslash(src[i]))
+    {
+      while(isslash(src[i]))
+        i++;
+
+      dest[p] = DIR_SEPARATOR_CHAR;
+      p++;
+    }
+    else
+    {
+      dest[p] = src[i];
+      i++;
+      p++;
+    }
+  }
+  dest[p] = '\0';
+
+  if((p >= 2) && (dest[p-1] == DIR_SEPARATOR_CHAR) && (dest[p-2] != ':'))
+    dest[p-1] = '\0';
+}
+
 void split_path_filename(const char *source,
  char *destpath, unsigned int dest_buffer_len,
  char *destfile, unsigned int file_buffer_len)
@@ -305,7 +465,7 @@ void split_path_filename(const char *source,
   if((stat_res >= 0) && S_ISDIR(path_info.st_mode))
   {
     if(dest_buffer_len)
-      strncpy(destpath, source, dest_buffer_len);
+      clean_path_slashes(source, destpath, dest_buffer_len);
 
     if(file_buffer_len)
       strcpy(destfile, "");
@@ -316,7 +476,7 @@ void split_path_filename(const char *source,
   {
     // get_path leaves off trailing /, add 1 to offset.
     if(dest_buffer_len)
-      strncpy(destpath, temppath, dest_buffer_len);
+      clean_path_slashes(temppath, destpath, dest_buffer_len);
 
     if(file_buffer_len)
       strncpy(destfile, &(source[strlen(temppath) + 1]), file_buffer_len);
@@ -330,6 +490,14 @@ void split_path_filename(const char *source,
     if(file_buffer_len)
       strncpy(destfile, source, file_buffer_len);
   }
+}
+
+void join_path_names(char* target, int max_len, const char* path1, const char* path2)
+{
+  if(path1[strlen(path1)-1] == DIR_SEPARATOR_CHAR)
+    snprintf(target, max_len, "%s%s", path1, path2);
+  else
+    snprintf(target, max_len, "%s%s%s", path1, DIR_SEPARATOR, path2);
 }
 
 int create_path_if_not_exists(const char *filename)
@@ -349,28 +517,6 @@ int create_path_if_not_exists(const char *filename)
     return 3;
 
   return 0;
-}
-
-static void clean_path_slashes(const char *source, char *dest, int buf_size)
-{
-  unsigned int i;
-  int p;
-
-  for(i = 0, p = 0;
-   (i < strlen(source)) && (source[i] != 0) && (p < buf_size-1);
-   i++, p++)
-  {
-    dest[p] = source[i];
-    while((dest[p] == DIR_SEPARATOR_CHAR) &&
-     (source[i + 1] == DIR_SEPARATOR_CHAR) &&
-     (source[i + 1] != 0))
-      i++;
-  }
-  dest[p] = '\0';
-
-  if((p >= 2) && (dest[p-1] == DIR_SEPARATOR_CHAR) && (dest[p-2] != ':'))
-    dest[p-1] = '\0';
-
 }
 
 // Navigate a path name.
@@ -461,7 +607,7 @@ int change_dir_name(char *path_name, const char *dest)
       return 0;
   }
 
-  snprintf(path, MAX_PATH, "%s%s%s", path_name, DIR_SEPARATOR, dest);
+  join_path_names(path, MAX_PATH, path_name, dest);
   path[MAX_PATH - 1] = 0;
 
   if(stat(path, &stat_info) >= 0)
@@ -553,6 +699,97 @@ void *boyer_moore_search(void *A, size_t a_len, void *B, size_t b_len,
     }
   }
   return NULL;
+}
+
+
+int mem_getc(const unsigned char **ptr)
+{
+  int val = (*ptr)[0];
+  *ptr += 1;
+  return val;
+}
+
+int mem_getw(const unsigned char **ptr)
+{
+  int val = (*ptr)[0] | ((*ptr)[1] << 8);
+  *ptr += 2;
+  return val;
+}
+
+int mem_getd(const unsigned char **ptr)
+{
+  int val = (*ptr)[0] | ((*ptr)[1] << 8) | ((*ptr)[2] << 16) | ((int)((*ptr)[3]) << 24);
+  *ptr += 4;
+  return val;
+}
+
+void mem_putc(int src, unsigned char **ptr)
+{
+  (*ptr)[0] = src;
+  *ptr += 1;
+}
+
+void mem_putw(int src, unsigned char **ptr)
+{
+  (*ptr)[0] = src & 0xFF;
+  (*ptr)[1] = (src >> 8) & 0xFF;
+  *ptr += 2;
+}
+
+void mem_putd(int src, unsigned char **ptr)
+{
+  (*ptr)[0] = src & 0xFF;
+  (*ptr)[1] = (src >> 8) & 0xFF;
+  (*ptr)[2] = (src >> 16) & 0xFF;
+  (*ptr)[3] = (src >> 24) & 0xFF;
+  *ptr += 4;
+}
+
+
+// like fsafegets, except from memory.
+int memsafegets(char *dest, int size, char **src, char *end)
+{
+  char *pos = dest;
+  char *next = *src;
+  char *stop = MIN(end, next+size);
+  char ch;
+
+  // Return 0 if this is the end of the memory block
+  if(next == NULL)
+    return 0;
+
+  // Copy the memory until the end, the bound, or a newline
+  while(next<stop && (ch = *next)!='\n')
+  {
+    *pos = ch;
+    pos++;
+    next++;
+  }
+  *pos = 0;
+
+  // Place the counter where the next line begins
+  if(next < end)
+  {
+    *src = next + 1;
+  }
+
+  // Mark that this is the end
+  else
+  {
+    *src = NULL;
+  }
+
+  // Length at least 1 -- get rid of \r and \n
+  if(pos > dest)
+    if(pos[-1] == '\r' || pos[-1] == '\n')
+      pos[-1] = 0;
+
+  // Length at least 2 -- get rid of \r and \n
+  if(pos - 1 > dest)
+    if(pos[-2] == '\r' || pos[-2] == '\n')
+      pos[-2] = 0;
+
+  return 1;
 }
 
 
@@ -652,7 +889,7 @@ bool dir_open(struct mzx_dir *dir, const char *path)
   while(readdir(dir->d) != NULL)
     dir->entries++;
 
-#ifdef CONFIG_PSP
+#if defined(CONFIG_PSP) || defined(CONFIG_3DS)
   strncpy(dir->path, path, PATH_BUF_LEN);
   dir->path[PATH_BUF_LEN - 1] = 0;
   closedir(dir->d);
@@ -685,7 +922,7 @@ void dir_seek(struct mzx_dir *dir, long offset)
 
   dir->pos = CLAMP(offset, 0L, dir->entries);
 
-#ifdef CONFIG_PSP
+#if defined(CONFIG_PSP) || defined(CONFIG_3DS)
   closedir(dir->d);
   dir->d = opendir(dir->path);
   if(!dir->d)
@@ -746,3 +983,12 @@ void __stack_chk_fail(void)
 
 #endif // __amigaos__
 
+#if defined(CONFIG_PSP) || defined(CONFIG_NDS)
+FILE *popen(const char *command, const char *type) {
+	return NULL;
+}
+
+int pclose(FILE *stream) {
+	return 0;
+}
+#endif // CONFIG_PSP || CONFIG_NDS

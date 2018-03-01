@@ -179,6 +179,12 @@ static void redit_hhelp(struct editor_config_info *conf,
   conf->redit_hhelp = strtol(value, NULL, 10);
 }
 
+static void pedit_hhelp(struct editor_config_info *conf,
+ char *name, char *value, char *extended_data)
+{
+  conf->pedit_hhelp = strtol(value, NULL, 10);
+}
+
 static void backup_count(struct editor_config_info *conf,
  char *name, char *value, char *extended_data)
 {
@@ -215,56 +221,54 @@ static void config_editor_enter_splits(struct editor_config_info *conf,
   conf->editor_enter_splits = strtol(value, NULL, 10);
 }
 
+static void config_editor_load_board_assets(struct editor_config_info *conf,
+ char *name, char *value, char *extended_data)
+{
+  conf->editor_load_board_assets = strtol(value, NULL, 10);
+}
+
 static void config_editor_tab_focus(struct editor_config_info *conf,
  char *name, char *value, char *extended_data)
 {
   conf->editor_tab_focuses_view = CLAMP(strtol(value, NULL, 10), 0, 1);
 }
 
+static void config_editor_thing_menu_places(struct editor_config_info *conf,
+ char *name, char *value, char *extended_data)
+{
+  conf->editor_thing_menu_places = CLAMP(strtol(value, NULL, 10), 0, 1);
+}
+
 static void config_undo_history_size(struct editor_config_info *conf,
  char *name, char *value, char *extended_data)
 {
-  conf->undo_history_size = strtol(value, NULL, 10);
+  conf->undo_history_size = CLAMP(strtol(value, NULL, 10), 0, 1000);
 }
 
 static void config_saved_positions(struct editor_config_info *conf,
  char *name, char *value, char *extended_data)
 {
-  int p = conf->num_jump_points;
-  char *board_id = NULL, *board_x = NULL, *board_y = NULL;
+  unsigned int pos;
+  unsigned int board_num;
+  unsigned int board_x;
+  unsigned int board_y;
+  unsigned int scroll_x;
+  unsigned int scroll_y;
+  unsigned int debug_x;
 
-  if(!(board_id = strchr(value, ',')))
+  sscanf(name, "saved_position%u", &pos);
+  sscanf(value, "%u, %u, %u, %u, %u, %u",
+   &board_num, &board_x, &board_y, &scroll_x, &scroll_y, &debug_x);
+
+  if(pos >= NUM_SAVED_POSITIONS)
     return;
-  board_id[0] = '\0';
-  board_id++;
 
-  if(!(board_x = strchr(board_id, ',')))
-    return;
-  board_x[0] = '\0';
-  board_x++;
-
-  if(!(board_y = strchr(board_x, ',')))
-    return;
-  board_y[0] = '\0';
-  board_y++;
-
-  // Verification of this will have to be done when the editor
-  // attempts to do a jump.
-
-  // Add to the list
-
-  if(conf->num_jump_points == 0)
-    conf->jump_points = cmalloc(0);
-
-  conf->num_jump_points++;
-  conf->jump_points = crealloc(conf->jump_points,
-   sizeof(struct jump_point) * conf->num_jump_points);
-
-  conf->jump_points[p].board_id = strtol(board_id, NULL, 10);
-  conf->jump_points[p].dest_x = strtol(board_x, NULL, 10);
-  conf->jump_points[p].dest_y = strtol(board_y, NULL, 10);
-  strncpy(conf->jump_points[p].name, value, BOARD_NAME_SIZE);
-  conf->jump_points[p].name[BOARD_NAME_SIZE] = '\0';
+  conf->saved_board[pos] = board_num;
+  conf->saved_cursor_x[pos] = board_x;
+  conf->saved_cursor_y[pos] = board_y;
+  conf->saved_scroll_x[pos] = scroll_x;
+  conf->saved_scroll_y[pos] = scroll_y;
+  conf->saved_debug_x[pos] = debug_x ? 60 : 0;
 }
 
 /******************/
@@ -375,6 +379,12 @@ static void config_board_restart(struct editor_config_info *conf,
   conf->restart_if_hurt = CLAMP(strtol(value, NULL, 10), 0, 1);
 }
 
+static void config_board_reset_on_entry(struct editor_config_info *conf,
+ char *name, char *value, char *extended_data)
+{
+  conf->reset_on_entry = CLAMP(strtol(value, NULL, 10), 0, 1);
+}
+
 static void config_board_locked_ns(struct editor_config_info *conf,
  char *name, char *value, char *extended_data)
 {
@@ -397,6 +407,22 @@ static void config_board_time_limit(struct editor_config_info *conf,
  char *name, char *value, char *extended_data)
 {
   conf->time_limit = CLAMP(strtol(value, NULL, 10), 0, 32767);
+}
+
+static void config_board_charset(struct editor_config_info *conf,
+ char *name, char *value, char *extended_data)
+{
+  int size = MIN(strlen(value), MAX_PATH - 1);
+  memcpy(conf->charset_path, value, size);
+  conf->charset_path[size] = 0;
+}
+
+static void config_board_palette(struct editor_config_info *conf,
+ char *name, char *value, char *extended_data)
+{
+  int size = MIN(strlen(value), MAX_PATH - 1);
+  strncpy(conf->palette_path, value, size);
+  conf->palette_path[size] = 0;
 }
 
 static void config_board_explosions(struct editor_config_info *conf,
@@ -456,6 +482,7 @@ static const struct editor_config_entry editor_config_options[] =
   { "backup_name", backup_name },
   { "board_default_can_bomb", config_board_can_bomb },
   { "board_default_can_shoot", config_board_can_shoot },
+  { "board_default_charset_path", config_board_charset },
   { "board_default_collect_bombs", config_board_collect_bombs },
   { "board_default_explosions_leave", config_board_explosions },
   { "board_default_fire_burns_brown", config_board_fire_brown },
@@ -466,9 +493,11 @@ static const struct editor_config_entry editor_config_options[] =
   { "board_default_forest_to_floor", config_board_forest },
   { "board_default_height", config_board_height },
   { "board_default_overlay", config_board_overlay },
+  { "board_default_palette_path", config_board_palette },
   { "board_default_player_locked_att", config_board_locked_att },
   { "board_default_player_locked_ew", config_board_locked_ew },
   { "board_default_player_locked_ns", config_board_locked_ns },
+  { "board_default_reset_on_entry", config_board_reset_on_entry },
   { "board_default_restart_if_hurt", config_board_restart },
   { "board_default_saving", config_board_saving },
   { "board_default_time_limit", config_board_time_limit },
@@ -493,11 +522,14 @@ static const struct editor_config_entry editor_config_options[] =
   { "color_coding_on", config_ccode_on },
   { "default_invalid_status", config_default_invald },
   { "editor_enter_splits", config_editor_enter_splits },
+  { "editor_load_board_assets", config_editor_load_board_assets },
   { "editor_space_toggles", config_editor_space_toggles },
   { "editor_tab_focuses_view", config_editor_tab_focus },
+  { "editor_thing_menu_places", config_editor_thing_menu_places },
   { "macro_*", config_macro },
+  { "palette_editor_hide_help", pedit_hhelp },
   { "robot_editor_hide_help", redit_hhelp },
-  { "saved_position", config_saved_positions },
+  { "saved_position!", config_saved_positions },
   { "undo_history_size", config_undo_history_size },
 };
 
@@ -532,8 +564,10 @@ static const struct editor_config_info default_editor_options =
 {
   // Board editor options
   0,                            // editor_space_toggles
-  0,                            // board_editor_hide_help
-  1,                            // editor_tab_focuses_view
+  1,                            // board_editor_hide_help
+  0,                            // editor_tab_focuses_view
+  0,                            // editor_load_board_assets
+  1,                            // editor_thing_menu_places
 
   // Defaults for new boards
   0,                            // viewport_x
@@ -552,6 +586,7 @@ static const struct editor_config_info default_editor_options =
   0,                            // forest_to_floor
   0,                            // collect_bombs
   0,                            // restart_if_hurt
+  0,                            // reset_on_entry
   0,                            // player_locked_ns
   0,                            // player_locked_ew
   0,                            // player_locked_att
@@ -559,16 +594,21 @@ static const struct editor_config_info default_editor_options =
   1,                            // explosions_leave (default = ash)
   0,                            // saving_enabled (default = enabled)
   1,                            // overlay_enabled (default = enabled)
+  "",                           // charset_path
+  "",                           // palette_path
+
+  // Palette editor options
+  0,                            // palette_editor_hide_help
 
   // Char editor options
-  10,                           // Undo history size
+  100,                          // Undo history size
 
   // Robot editor options
   true,
   { 11, 10, 10, 14, 255, 3, 11, 2, 14, 0, 15, 11, 7, 15, 1, 2, 3 },
   1,                            // color_coding_on
   1,                            // default_invalid_status
-  0,                            // robot_editor_hide_help
+  1,                            // robot_editor_hide_help
 
   // Backup options
   3,                            // backup_count
@@ -582,20 +622,28 @@ static const struct editor_config_info default_editor_options =
   0,
   NULL,
 
-  // Jump points
-  0,
-  NULL,
+  // Saved positions
+  { 0 },
+  { 0 },
+  { 0 },
+  { 0 },
+  { 0 },
+  { 60, 60, 60, 60, 60, 60, 60, 60, 60, 60 },
 
 };
 
-static void editor_config_change_option(void *conf, char *name, char *value,
+static int editor_config_change_option(void *conf, char *name, char *value,
  char *extended_data)
 {
   const struct editor_config_entry *current_option = find_editor_option(name,
    editor_config_options, num_editor_config_options);
 
   if(current_option)
+  {
     current_option->change_option(conf, name, value, extended_data);
+    return 1;
+  }
+  return 0;
 }
 
 void set_editor_config_from_file(struct editor_config_info *conf,
@@ -621,7 +669,7 @@ void save_local_editor_config(struct editor_config_info *conf,
   int mzx_file_len = strlen(mzx_file_path) - 4;
   char config_file_name[MAX_PATH];
 
-  char buf[60] = { 0 };
+  char buf[MAX_PATH + 60] = { 0 };
   char buf2[20] = { 0 };
 
   const char *comment =
@@ -631,6 +679,7 @@ void save_local_editor_config(struct editor_config_info *conf,
   const char *comment_b =
     "\n#####        End editor generated configuration        #####";
   FILE *fp;
+  int i;
 
   if(mzx_file_len <= 0)
     return;
@@ -738,6 +787,8 @@ void save_local_editor_config(struct editor_config_info *conf,
   fwrite(buf, 1, strlen(buf), fp);
   sprintf(buf, "board_default_restart_if_hurt = %i\n", conf->restart_if_hurt);
   fwrite(buf, 1, strlen(buf), fp);
+  sprintf(buf, "board_default_reset_on_entry = %i\n", conf->reset_on_entry);
+  fwrite(buf, 1, strlen(buf), fp);
   sprintf(buf, "board_default_player_locked_ns = %i\n", conf->player_locked_ns);
   fwrite(buf, 1, strlen(buf), fp);
   sprintf(buf, "board_default_player_locked_ew = %i\n", conf->player_locked_ew);
@@ -745,6 +796,10 @@ void save_local_editor_config(struct editor_config_info *conf,
   sprintf(buf, "board_default_player_locked_att = %i\n", conf->player_locked_att);
   fwrite(buf, 1, strlen(buf), fp);
   sprintf(buf, "board_default_time_limit = %i\n", conf->time_limit);
+  fwrite(buf, 1, strlen(buf), fp);
+  sprintf(buf, "board_default_charset_path = %s\n", conf->charset_path);
+  fwrite(buf, 1, strlen(buf), fp);
+  sprintf(buf, "board_default_palette_path = %s\n", conf->palette_path);
   fwrite(buf, 1, strlen(buf), fp);
 
   switch(conf->explosions_leave)
@@ -795,16 +850,19 @@ void save_local_editor_config(struct editor_config_info *conf,
   sprintf(buf, "board_default_overlay = %s\n", buf2);
   fwrite(buf, 1, strlen(buf), fp);
 
-  if(conf->num_jump_points)
+  fwrite("\n", 1, 1, fp);
+  for(i = 0; i < NUM_SAVED_POSITIONS; i++)
   {
-    int i;
-
-    fwrite("\n", 1, 1, fp);
-    for(i = 0; i < conf->num_jump_points; i++)
-    {
-      struct jump_point *j = &(conf->jump_points[i]);
-      sprintf(buf, "saved_position = %s,%i,%i,%i\n", j->name, j->board_id, j->dest_x, j->dest_y);
-    }
+    sprintf(buf, "saved_position%u = %u, %u, %u, %u, %u, %u\n",
+     i,
+     conf->saved_board[i],
+     conf->saved_cursor_x[i],
+     conf->saved_cursor_y[i],
+     conf->saved_scroll_x[i],
+     conf->saved_scroll_y[i],
+     conf->saved_debug_x[i]
+    );
+    fwrite(buf, 1, strlen(buf), fp);
   }
 
   fwrite(comment, 1, strlen(comment), fp);

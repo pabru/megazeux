@@ -2176,14 +2176,17 @@ static const char *const dir_names[20] =
   "RANDNOT"
 };
 
-static const char *const equality_names[6] =
+static const char *const equality_names[] =
 {
   "=",
   "<",
   ">",
   ">=",
   "<=",
-  "!="
+  "!=",
+  "===",
+  "?=",
+  "?=="
 };
 
 static const char *const condition_names[18] =
@@ -2607,7 +2610,7 @@ static const struct special_word *find_special_word(const char *name,
 
 static inline bool is_identifier_char(char c)
 {
-  return isalnum((int)c) || (c == '$') || (c == '_') || (c == '?') ||
+  return isalnum((int)c) || (c == '$') || (c == '_') ||
                             (c == '#') || (c == '.');
 }
 
@@ -2680,6 +2683,66 @@ static char *find_comment(char *src)
   }
 
   return src;
+}
+
+static bool is_color(char *value)
+{
+  if((value[0] == 'c') && (value[1] != 0) &&
+   ((isxdigit((int)value[1]) || (value[1] == '?')) &&
+   (isxdigit((int)value[2]) || (value[2] == '?')) &&
+   (isspace(value[3]) || (value[3] == '\0'))))
+  {
+    return true;
+  }
+  else
+  {
+    return false;
+  }
+}
+
+static bool is_basic_color(char *value)
+{
+  if((value[0] == 'c') && (value[1] != 0) &&
+   isxdigit((int)value[1]) &&
+   isxdigit((int)value[2]) &&
+   (isspace(value[3]) || (value[3] == '\0')))
+  {
+    return true;
+  }
+  else
+  {
+    return false;
+  }
+}
+
+static bool is_param(char *value)
+{
+  if((value[0] == 'p') && (value[1] != 0) &&
+   ((isxdigit((int)value[1]) && isxdigit((int)value[2])) ||
+   ((value[1] == '?') && (value[2] == '?'))) &&
+   (isspace(value[3]) || (value[3] == '\0')))
+  {
+    return true;
+  }
+  else
+  {
+    return false;
+  }
+}
+
+static bool is_basic_param(char *value)
+{
+  if((value[0] == 'p') && (value[1] != 0) &&
+   isxdigit((int)value[1]) &&
+   isxdigit((int)value[2]) &&
+   (isspace(value[3]) || (value[3] == '\0')))
+  {
+    return true;
+  }
+  else
+  {
+    return false;
+  }
 }
 
 static int get_param(char *cmd_line)
@@ -2791,22 +2854,46 @@ static char *get_character_string_expressions(char *src, char terminator,
  int *contains_expressions);
 static char *get_expression(char *src);
 
+enum is_op_type
+{
+  NOT_OPERATOR = 0,
+  IS_OPERATOR_UNARY = 0, // ignore these; they'll get picked up as token pieces.
+
+  IS_OPERATOR = 1,
+  IS_OPERATOR_TERNARY_OPEN = 2,
+  IS_OPERATOR_TERNARY_CLOSE = 3,
+};
+
 static char *get_expr_binary_operator_token(char *src, int *_is_operator)
 {
-  int is_operator = 1;
+  int is_operator = IS_OPERATOR;
 
   switch(*src)
   {
     // One char operators, not the start of a two char one.
     case '+':
-    case '-':
+    case '-': // Can be a regular operator or a unary operator.
     case '/':
     case '%':
     case '&':
     case '|':
     case '^':
-    case '~':
     case '=':
+      break;
+
+    // Unary only.
+    case '~':
+      is_operator = IS_OPERATOR_UNARY;
+      break;
+
+    // Ternary operator special case - this needs to be counted
+    case '?':
+      is_operator = IS_OPERATOR_TERNARY_OPEN;
+      break;
+
+    // Ternary operator special case - this needs to be counted
+    case ':':
+      is_operator = IS_OPERATOR_TERNARY_CLOSE;
       break;
 
     case '*':
@@ -2823,9 +2910,11 @@ static char *get_expr_binary_operator_token(char *src, int *_is_operator)
 
       if(src[1] == '>')
       {
-        src++;
-        if(src[1] == '>')
+        if(src[2] == '>')
+        {
           src++;
+        }
+        src++;
       }
       break;
 
@@ -2839,11 +2928,17 @@ static char *get_expr_binary_operator_token(char *src, int *_is_operator)
 
     case '!':
       if(src[1] == '=')
+      {
         src++;
+      }
+      else
+      {
+        is_operator = IS_OPERATOR_UNARY;
+      }
       break;
 
     default:
-      is_operator = 0;
+      is_operator = NOT_OPERATOR;
       break;
   }
 
@@ -2859,7 +2954,7 @@ static char *get_expr_value_token(char *src)
   char *next = src;
 
   // Unary operators are okay, just eats up spaces until next ones.
-  while((*next == '-') || (*next == '~'))
+  while((*next == '-') || (*next == '~') || (*next == '!'))
     next = skip_whitespace(next + 1);
 
   switch(*next)
@@ -2908,8 +3003,15 @@ static char *get_expr_value_token(char *src)
 
     default:
     {
+      char *start = next;
+
       // Grab a valid identifier out of this.
       next = find_non_identifier_char(next);
+
+      // After skipping spaces/unaries, we're at a non-identifier char? Invalid
+      if(next == start)
+        return src;
+
       break;
     }
   }
@@ -2920,7 +3022,9 @@ static char *get_expr_value_token(char *src)
 static char *get_expression(char *src)
 {
   char *next, *next_next;
+  int ternary_level = 0;
   int is_operator;
+
   // Skip initial whitespace.
   src = skip_whitespace(src);
 
@@ -2945,6 +3049,15 @@ static char *get_expression(char *src)
     if(!is_operator)
       return src;
 
+    if(is_operator == IS_OPERATOR_TERNARY_OPEN)
+      ternary_level++;
+
+    else if(is_operator == IS_OPERATOR_TERNARY_CLOSE)
+      ternary_level--;
+
+    if(ternary_level < 0)
+      return src;
+
     next = skip_whitespace(next);
     // Now get a value token.
     next_next = get_expr_value_token(next);
@@ -2953,6 +3066,9 @@ static char *get_expression(char *src)
 
     next = next_next;
   }
+
+  if(ternary_level > 0)
+    return src;
 
   return next;
 }
@@ -3174,7 +3290,6 @@ static char *get_token(char *src, struct token *token)
         token->arg_value.equality_type = LESS_THAN;
       }
 
-      next++;
       break;
 
     // Match >, >=, or ><
@@ -3198,10 +3313,9 @@ static char *get_token(char *src, struct token *token)
         token->arg_value.equality_type = GREATER_THAN;
       }
 
-      next++;
       break;
 
-    // Match =, ==, =<, or =>
+    // Match =, ==, ===, =<, or =>
     case '=':
       token_type = TOKEN_TYPE_EQUALITY;
       token->arg_value.equality_type = EQUAL;
@@ -3209,6 +3323,11 @@ static char *get_token(char *src, struct token *token)
       next = src + 1;
       if(src[1] == '=')
       {
+        if(src[2] == '=')
+        {
+          token->arg_value.equality_type = EXACTLY_EQUAL;
+          next++;
+        }
         next++;
       }
       else
@@ -3226,7 +3345,6 @@ static char *get_token(char *src, struct token *token)
         next++;
       }
 
-      next++;
       break;
 
     // Match ! or !=
@@ -3236,7 +3354,32 @@ static char *get_token(char *src, struct token *token)
       if(src[1] == '=')
       {
         token->arg_value.equality_type = NOT_EQUAL;
-        next += 2;
+        next += 1;
+      }
+      else
+      {
+        token_type |= TOKEN_TYPE_INVALID;
+      }
+      break;
+
+    // Match ?= or ?==
+    case '?':
+      token_type = TOKEN_TYPE_EQUALITY;
+      next = src + 1;
+      if(src[1] == '=')
+      {
+        token->arg_value.equality_type = WILD_EQUAL;
+        next++;
+
+        if(src[2] == '=')
+        {
+          token->arg_value.equality_type = WILD_EXACTLY_EQUAL;
+          next++;
+        }
+      }
+      else
+      {
+        token_type |= TOKEN_TYPE_INVALID;
       }
       break;
 
@@ -3249,16 +3392,48 @@ static char *get_token(char *src, struct token *token)
       break;
 
     default:
-      // It's just a string - could be an ignore word or otherwise a basic
-      // identifier.
-      next = find_non_identifier_char(src);
-      token_type = TOKEN_TYPE_BASIC_IDENTIFIER;
+      if(is_color(src))
+      {
+        // Color
+        next = src + 3;
+        // We need two different types, since basic colors can also be
+        // identifiers. Wildcard colors can't, since they have ?s.
+        if(is_basic_color(src))
+          token_type = TOKEN_TYPE_BASIC_COLOR;
+        else
+          token_type = TOKEN_TYPE_WILDCARD_COLOR;
+      }
+      else
+
+      if(is_param(src))
+      {
+        // Param
+        next = src + 3;
+        // We need two different types, since basic params can also be
+        // identifiers. Wildcard params can't, since they have ?s.
+        if(is_basic_param(src))
+          token_type = TOKEN_TYPE_BASIC_PARAM;
+        else
+          token_type = TOKEN_TYPE_WILDCARD_PARAM;
+      }
+
+      else
+      {
+        // It's just a string - could be an ignore word or otherwise a basic
+        // identifier.
+        next = find_non_identifier_char(src);
+        token_type = TOKEN_TYPE_BASIC_IDENTIFIER;
+      }
 
       // Until we decide we care about what special word this is then this
       // stays NULL.
       token->value_is_cached = false;
       break;
   }
+
+  // The next character must be the terminator or a space.
+  if(!isspace(*next) && *next != '\0')
+    token_type = TOKEN_TYPE_INVALID;
 
   token->length = next - src;
   token->value = src;
@@ -3478,34 +3653,6 @@ static const struct command_set *find_command_set(const char *name,
   }
 
   return NULL;
-}
-
-static bool is_color(char *value)
-{
-  if((value[0] == 'c') && (value[1] != 0) &&
-   ((isxdigit((int)value[1]) || (value[1] == '?')) &&
-   (isxdigit((int)value[2]) || (value[2] == '?'))))
-  {
-    return true;
-  }
-  else
-  {
-    return false;
-  }
-}
-
-static bool is_param(char *value)
-{
-  if((value[0] == 'p') && (value[1] != 0) &&
-   ((isxdigit((int)value[1]) && isxdigit((int)value[2])) ||
-   ((value[1] == '?') && (value[2] == '?'))))
-  {
-    return true;
-  }
-  else
-  {
-    return false;
-  }
 }
 
 // This structure acts as a cache so we don't have to keep grabbing the same
@@ -3733,6 +3880,7 @@ static int match_command(const struct mzx_command *command,
   int arg_position = 0;
   int parameters = command->parameters;
   int strength = 0;
+  int match_next_arg = 0;
 
   // Step through each parameter in the command - it requires 0 to N
   // tokens (possibly depending on what tokens we have). If we need more
@@ -3745,10 +3893,15 @@ static int match_command(const struct mzx_command *command,
     arg_type = command->param_types[arg_position];
     arg_position++;
 
-    // All args will take at least one token. It's just that if it's optional
-    // it'll toss it back.
+    // All args will take at least one token. If a token wants to try to match
+    // the next argument in the list, don't get a new token.
 
-    get_token_skip_comments(goto no_match);
+    if(!match_next_arg)
+    {
+      // Alters current_token, token_type, and sometimes match_type
+      get_token_skip_comments(goto no_match);
+    }
+    match_next_arg = 0;
 
     if(arg_type & ARG_TYPE_IGNORE)
     {
@@ -3764,9 +3917,9 @@ static int match_command(const struct mzx_command *command,
         continue;
       }
 
-      // Otherwise, fall through and let it match something else.
-      arg_type = command->param_types[arg_position];
-      arg_position++;
+      // Try to match the next argument in the list.
+      match_next_arg = 1;
+      continue;
     }
 
     if(arg_type & ARG_TYPE_FRAGMENT)
@@ -3822,16 +3975,16 @@ static int match_command(const struct mzx_command *command,
     }
 
     if((arg_type & ARG_TYPE_COLOR) &&
-     (token_type == TOKEN_TYPE_BASIC_IDENTIFIER) &&
-     (is_color(current_token->value)))
+     ((token_type == TOKEN_TYPE_BASIC_COLOR) ||
+     (token_type == TOKEN_TYPE_WILDCARD_COLOR)))
     {
       *match_type = ARG_TYPE_INDEXED_COLOR;
       continue;
     }
 
     if((arg_type & ARG_TYPE_PARAM) &&
-     (token_type == TOKEN_TYPE_BASIC_IDENTIFIER) &&
-     (is_param(current_token->value)))
+     ((token_type == TOKEN_TYPE_BASIC_PARAM) ||
+     (token_type == TOKEN_TYPE_WILDCARD_PARAM)))
     {
       *match_type = ARG_TYPE_INDEXED_PARAM;
       continue;
@@ -3910,7 +4063,9 @@ static int match_command(const struct mzx_command *command,
      ARG_TYPE_ROBOT_NAME)) &&
      ((token_type == TOKEN_TYPE_NAME) ||
      (token_type == TOKEN_TYPE_BASIC_IDENTIFIER) ||
-     (token_type == TOKEN_TYPE_EXPRESSION)))
+     (token_type == TOKEN_TYPE_EXPRESSION) ||
+     (token_type == TOKEN_TYPE_BASIC_COLOR) ||
+     (token_type == TOKEN_TYPE_BASIC_PARAM)))
     {
       // A name match is a weak match, so take away from the strength by
       // decrementing it.
@@ -4323,7 +4478,9 @@ static char *assemble_command(char *src, char **_output)
   return NULL;
 }
 
-char *assemble_program(char *program_source, int *_bytecode_length)
+void assemble_program(char *program_source, char **_bytecode,
+ int *_bytecode_length, struct command_mapping **_command_map,
+ int *_command_map_length)
 {
   int bytecode_length = 1;
   int bytecode_offset = 1;
@@ -4335,13 +4492,78 @@ char *assemble_program(char *program_source, int *_bytecode_length)
 
   int command_length;
 
+  int cmd_map_length = 1;
+  int cmd_map_allocated = 256;
+  struct command_mapping *cmd_map = NULL;
+  char *src_start = program_source;
+  char *line_start = NULL;
+  char *line_text = NULL;
+  int real_line = 1;
+
+  if(_command_map)
+  {
+    cmd_map = malloc(cmd_map_allocated * sizeof(struct command_mapping));
+    cmd_map[0].real_line = 0;
+    cmd_map[0].bc_pos = 0;
+    cmd_map[0].src_pos = 0;
+  }
+
   program_bytecode[0] = 0xFF;
 
   do
   {
-    // Disassemble command into command_buffer.
-    output = command_buffer;
-    program_source = assemble_command(program_source, &output);
+    if(cmd_map)
+    {
+      line_start = program_source;
+      line_text = program_source;
+
+      // Count whitespace lines until start of token.
+      // FIXME this is a hack
+      while(whitespace_until_newline(line_text, &line_text))
+      {
+        line_start = line_text;
+        real_line++;
+        if(!*line_text)
+          break;
+      }
+
+      if(cmd_map_length >= cmd_map_allocated)
+      {
+        cmd_map_allocated *= 2;
+        cmd_map =
+         realloc(cmd_map, cmd_map_allocated * sizeof(struct command_mapping));
+      }
+
+      cmd_map[cmd_map_length].real_line = real_line;
+      cmd_map[cmd_map_length].bc_pos = bytecode_offset;
+      cmd_map[cmd_map_length].src_pos = line_start - src_start;
+      cmd_map_length++;
+
+      // Disassemble command into command_buffer.
+      output = command_buffer;
+      program_source = assemble_command(program_source, &output);
+
+      // Comment? backtrack
+      if(output == command_buffer)
+        cmd_map_length--;
+
+      // Count the number of lines passed during assembly.
+      // FIXME this is a hack
+      while(line_text < program_source)
+      {
+        if(*line_text == '\n')
+          real_line++;
+
+        line_text++;
+      }
+    }
+
+    else
+    {
+      // Disassemble command into command_buffer.
+      output = command_buffer;
+      program_source = assemble_command(program_source, &output);
+    }
 
     // See if it's valid
     if(program_source)
@@ -4371,9 +4593,18 @@ char *assemble_program(char *program_source, int *_bytecode_length)
   bytecode_length++;
   program_bytecode = realloc(program_bytecode, bytecode_length);
   program_bytecode[bytecode_offset] = 0;
+
+  *_bytecode = program_bytecode;
   *_bytecode_length = bytecode_length;
 
-  return program_bytecode;
+  // Shrink the command mapping.
+  if(cmd_map)
+  {
+    cmd_map = realloc(cmd_map, cmd_map_length * sizeof(struct command_mapping));
+
+    *_command_map = cmd_map;
+    *_command_map_length = cmd_map_length;
+  }
 }
 
 
@@ -4716,7 +4947,7 @@ static char *legacy_disassemble_print_expression(char *src, char **_output,
  int *_string_length);
 static char *legacy_disassemble_print_string_expressions(char *src,
  char **_output, int *_string_length, int early_terminator,
- int escape_char);
+ int escape_char, int is_expression_interpolation);
 
 static char *legacy_disassemble_print_binary_operator(char *src,
  char **_output, int *_string_length)
@@ -4732,11 +4963,11 @@ static char *legacy_disassemble_print_binary_operator(char *src,
     case '-':
     case '/':
     case '%':
-    case '&':
-    case '|':
     case '~':
     case '*':
     case '=':
+    case '?':
+    case ':':
       *output = operator_char;
       output++;
       break;
@@ -4770,6 +5001,13 @@ static char *legacy_disassemble_print_binary_operator(char *src,
       {
         *output = operator_char;
         output++;
+        if(src[2] == operator_char)
+        {
+          *output = operator_char;
+          output++;
+          src++;
+          string_length--;
+        }
         src++;
         string_length--;
       }
@@ -4886,7 +5124,7 @@ static char *legacy_disassemble_print_expr_value_token(char *src,
       char *base_output = output;
 
       next_next = legacy_disassemble_print_string_expressions(next + 1,
-       &output, &string_length, base_char, '`');
+       &output, &string_length, base_char, '`', false);
 
       name_length = output - base_output;
 
@@ -5030,7 +5268,7 @@ static bool legacy_disassembled_field_is_string(char *src, char *end)
 // If you don't want an early terminator then give this -1.
 static char *legacy_disassemble_print_string_expressions(char *src,
  char **_output, int *_string_length, int early_terminator,
- int escape_char)
+ int escape_char, int is_expression_interpolation)
 {
   char current_char = *src;
   char *output = *_output;
@@ -5038,6 +5276,11 @@ static char *legacy_disassemble_print_string_expressions(char *src,
 
   while(string_length && (current_char != early_terminator))
   {
+    // Hack: legacy Robotic allowed unclosed interpolation in expression
+    // identifiers to work, so we need to as well.
+    if(current_char == '\'' && is_expression_interpolation)
+      break;
+
     if(current_char == '(')
     {
       char *next = legacy_disassemble_print_expression(src, &output,
@@ -5098,10 +5341,12 @@ static char *legacy_disassemble_print_string_expressions(char *src,
         name_offset = output;
 
         next = legacy_disassemble_print_string_expressions(src, &output,
-         &string_length, '&', -1);
+         &string_length, '&', -1, true);
 
         name_length = output - name_offset;
 
+        // Consume the terminating char if it's an &. Interpolation can also
+        // terminate with a null or a ' (due to a bug); in these cases, don't.
         if(*next == '&')
         {
           string_length--;
@@ -5248,13 +5493,29 @@ static char *legacy_disassemble_arg(enum arg_type arg_type, char *src,
     src += 3;
 
     if(arg_type & ARG_TYPE_ITEM)
-      write_arg_word(item_names[compiled_arg_value]);
+    {
+      if(compiled_arg_value < (int)ARRAY_SIZE(item_names))
+      {
+        write_arg_word(item_names[compiled_arg_value]);
+      }
+      else
+      {
+        write_arg_word("INVALID_ITEM");
+      }
+    }
 
     if(arg_type & ARG_TYPE_CONDITION)
     {
       int condition = compiled_arg_value & 0xFF;
       int direction = compiled_arg_value >> 8;
-      const char *_str = condition_names[condition];
+      const char *_str;
+
+      if(condition < (int)ARRAY_SIZE(condition_names))
+        _str = condition_names[condition];
+
+      else
+        _str = "invalid_condition";
+
       strcpy(output, _str);
       output += strlen(_str);
 
@@ -5277,10 +5538,28 @@ static char *legacy_disassemble_arg(enum arg_type arg_type, char *src,
     }
 
     if(arg_type & ARG_TYPE_EQUALITY)
-      write_arg_word(equality_names[compiled_arg_value]);
+    {
+      if(compiled_arg_value < (int)ARRAY_SIZE(equality_names))
+      {
+        write_arg_word(equality_names[compiled_arg_value]);
+      }
+      else
+      {
+        write_arg_word("??");
+      }
+    }
 
     if(arg_type & ARG_TYPE_THING)
-      write_arg_word(thing_names[compiled_arg_value]);
+    {
+      if(compiled_arg_value < (int)ARRAY_SIZE(thing_names))
+      {
+        write_arg_word(thing_names[compiled_arg_value]);
+      }
+      else
+      {
+        write_arg_word("Invalid_thing");
+      }
+    }
 
     if(arg_type & ARG_TYPE_DIRECTION)
     {
@@ -5372,14 +5651,14 @@ static char *legacy_disassemble_arg(enum arg_type arg_type, char *src,
       if(is_simple_identifier_name(src, arg_length, false))
       {
         src = legacy_disassemble_print_string_expressions(src, &output,
-         &arg_length, -1, -1);
+         &arg_length, -1, -1, false);
       }
       else
       {
         *output = '`';
         output++;
         src = legacy_disassemble_print_string_expressions(src, &output,
-         &arg_length, -1, '`');
+         &arg_length, -1, '`', false);
         *output = '`';
         output++;
       }
@@ -5393,7 +5672,7 @@ static char *legacy_disassemble_arg(enum arg_type arg_type, char *src,
       *output = '"';
       output++;
       src = legacy_disassemble_print_string_expressions(src, &output,
-       &arg_length, -1, '"');
+       &arg_length, -1, '"', false);
       *output = '"';
 
       *_output = output + 1;
@@ -5404,7 +5683,7 @@ static char *legacy_disassemble_arg(enum arg_type arg_type, char *src,
   return src;
 }
 
-static int legacy_disassemble_command(char *command_base, char *output_base,
+__editor_maybe_static int legacy_disassemble_command(char *command_base, char *output_base,
  int *line_length, int bytecode_length, bool print_ignores, int base)
 {
   int command_length = *command_base;
@@ -5633,6 +5912,71 @@ char *legacy_convert_file(char *file_name, int *_disasm_length,
     *_disasm_length = disasm_length;
 
     fclose(legacy_source_file);
+    return program_disasm;
+  }
+
+  return NULL;
+}
+
+char *legacy_convert_file_mem(char *src, int len, int *_disasm_length,
+ bool print_ignores, int base)
+{
+  if(len)
+  {
+    char *input_start = src;
+    char *input_end = src + len;
+
+    int disasm_length = 0;
+    int disasm_offset = 0;
+    int disasm_length_allocated = 256;
+    char *program_disasm = malloc(disasm_length_allocated);
+
+    char source_buffer[256];
+    char command_buffer[512];
+    char bytecode_buffer[256];
+    char errors[256];
+
+    int disasm_line_length;
+
+    // Copying to a buffer isn't the quickest solution, but trying to
+    // handle it differently turns into spaghetti.
+    while(memsafegets(source_buffer, 255, &input_start, input_end))
+    {
+      // Assemble line
+      legacy_assemble_line(source_buffer, bytecode_buffer, errors,
+       NULL, NULL);
+
+      // Disassemble command into command_buffer.
+      legacy_disassemble_command(bytecode_buffer, command_buffer,
+       &disasm_line_length, 256, print_ignores, base);
+      command_buffer[disasm_line_length] = 0;
+
+      // Increment the total size (plus size for new line)
+      disasm_length += disasm_line_length + 1;
+
+      // Reallocate buffer if necessary.
+      while(disasm_length > disasm_length_allocated)
+      {
+        disasm_length_allocated *= 2;
+        program_disasm =  realloc(program_disasm, disasm_length_allocated);
+      }
+
+      // Copy new line into buffer.
+      memcpy(program_disasm + disasm_offset, command_buffer,
+       disasm_line_length);
+
+      // Write newline char.
+      disasm_offset += disasm_line_length;
+      program_disasm[disasm_offset] = '\n';
+      disasm_offset++;
+    }
+
+    // Null terminate and return total size.
+    disasm_length++;
+    program_disasm = realloc(program_disasm, disasm_length);
+    program_disasm[disasm_offset] = 0;
+    *_disasm_length = disasm_length;
+
     return program_disasm;
   }
 

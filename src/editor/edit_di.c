@@ -1,6 +1,7 @@
 /* MegaZeux
  *
  * Copyright (C) 1996 Greg Janson
+ * Copyright (C) 2017 Alice Rowan <petrifiedrowan@gmail.com>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
@@ -22,6 +23,7 @@
 #include <string.h>
 
 #include "../helpsys.h"
+#include "../event.h"
 #include "../intake.h"
 #include "../graphics.h"
 #include "../window.h"
@@ -537,8 +539,11 @@ void status_counter_info(struct world *mzx_world)
   };
   int i;
 
+  // Prevent previous keys from carrying through.
+  force_release_all_keys();
+
   set_confirm_buttons(elements);
-  set_context(82);
+  set_context(CTX_STATUS_COUNTERS);
 
   elements[2] = construct_input_box(12, 5,
    status_counters_strings[0], COUNTER_NAME_SIZE - 1, 0,
@@ -557,6 +562,9 @@ void status_counter_info(struct world *mzx_world)
   run_dialog(mzx_world, &di);
   destruct_dialog(&di);
 
+  // Prevent UI keys from carrying through.
+  force_release_all_keys();
+
   pop_context();
 }
 
@@ -571,7 +579,7 @@ void board_exits(struct world *mzx_world)
   memcpy(exits, src_board->board_dir, sizeof(int) * 4);
 
   set_confirm_buttons(elements);
-  set_context(83);
+  set_context(CTX_BOARD_EXITS);
 
   elements[2] = construct_board_list(12, 4, "Board to north:",
    1, exits + 0);
@@ -595,13 +603,27 @@ void board_exits(struct world *mzx_world)
   pop_context();
 }
 
+static void bound_board_size(int *width, int *height)
+{
+  if((*width) * (*height) > MAX_BOARD_SIZE)
+  {
+    if(*width > *height)
+      *height = MAX_BOARD_SIZE / *width;
+
+    else
+      *width = MAX_BOARD_SIZE / *height;
+  }
+}
+
 // Size/pos of board/viewport
-void size_pos(struct world *mzx_world)
+// Returns 1 if the board was resized
+int size_pos(struct world *mzx_world)
 {
   struct board *src_board = mzx_world->current_board;
   int dialog_result;
   struct element *elements[9];
   struct dialog di;
+  int resized = 0;
 
   int redo = 1;
 
@@ -612,7 +634,10 @@ void size_pos(struct world *mzx_world)
     src_board->board_width, src_board->board_height
   };
 
-  set_context(84);
+  // Prevent previous keys from carrying through.
+  force_release_all_keys();
+
+  set_context(CTX_BOARD_SIZES);
 
   do
   {
@@ -638,6 +663,16 @@ void size_pos(struct world *mzx_world)
     dialog_result = run_dialog(mzx_world, &di);
     destruct_dialog(&di);
 
+    // Prevent previous keys from carrying through.
+    force_release_all_keys();
+
+    // Center
+    if(dialog_result == 1)
+    {
+      results[0] = 40 - (results[2] / 2);
+      results[1] = 12 - (results[3] / 2);
+    }
+
     // Fix sizes
     if(results[2] > results[4])
       results[2] = results[4];
@@ -650,14 +685,6 @@ void size_pos(struct world *mzx_world)
 
     switch(dialog_result)
     {
-      default:
-      {
-        // Center
-        results[0] = 40 - (results[2] / 2);
-        results[1] = 12 - (results[3] / 2);
-        break;
-      }
-
       case -1:
       {
         redo = 0;
@@ -672,27 +699,29 @@ void size_pos(struct world *mzx_world)
         // Hack to prevent multiplies of 256, for now - only relevant
         // with overlay off, but we want to avoid complications if
         // the user turns the overlay off later
+
+        // As of the new format, this isn't really necessary.
         if((results[4] % 256) == 0)
           results[4]++;
 
-        if((results[4] * results[5]) > MAX_BOARD_SIZE)
-        {
-          if(results[4] > results[5])
-            results[5] = MAX_BOARD_SIZE / results[4];
-          else
-            results[4] = MAX_BOARD_SIZE / results[5];
-        }
+        bound_board_size(results + 4, results + 5);
 
         if(((results[4] >= src_board->board_width) &&
           (results[5] >= src_board->board_height)) ||
           !confirm(mzx_world, "Reduce board size- Are you sure?"))
         {
-          redo = 0;
-          change_board_size(src_board, results[4], results[5]);
+          if(results[4] != src_board->board_width ||
+           results[5] != src_board->board_height)
+          {
+            change_board_size(src_board, results[4], results[5]);
+            resized = 1;
+          }
+
           src_board->viewport_x = results[0];
           src_board->viewport_y = results[1];
           src_board->viewport_width = results[2];
           src_board->viewport_height = results[3];
+          redo = 0;
         }
         break;
       }
@@ -713,52 +742,162 @@ void size_pos(struct world *mzx_world)
   } while(redo);
 
   pop_context();
+
+  return resized;
+}
+
+// Size of vlayer
+// Returns 1 if the vlayer was resized
+int size_pos_vlayer(struct world *mzx_world)
+{
+  int dialog_result;
+  struct element *elements[4];
+  struct dialog di;
+  int resized = 0;
+
+  int results[2] = {
+    mzx_world->vlayer_width,
+    mzx_world->vlayer_height
+  };
+
+  int redo = 1;
+
+  // Prevent previous keys from carrying through.
+  force_release_all_keys();
+
+  set_context(CTX_VLAYER_SIZES);
+
+  do
+  {
+    elements[0] = construct_button(23, 8, "OK", 0);
+    elements[1] = construct_button(29, 8, "Cancel", -1);
+
+    elements[2] = construct_number_box(15, 4, "Vlayer Width:    ",
+     1, 32767, 0, results + 0);
+    elements[3] = construct_number_box(15, 5, "Vlayer Height:   ",
+     1, 32767, 0, results + 1);
+
+    construct_dialog(&di, "Vlayer Size", 10, 7, 60, 11,
+     elements, 4, 2);
+
+    dialog_result = run_dialog(mzx_world, &di);
+    destruct_dialog(&di);
+
+    // Prevent UI keys from carrying through.
+    force_release_all_keys();
+
+    switch(dialog_result)
+    {
+      // Cancel
+      case -1:
+      {
+        redo = 0;
+        break;
+      }
+
+      // OK
+      case 0:
+      {
+        // The vlayer has the same size restrictions as boards.
+        bound_board_size(results + 0, results + 1);
+
+        if(results[0] == mzx_world->vlayer_width &&
+         results[1] == mzx_world->vlayer_height)
+        {
+          resized = 0;
+          redo = 0;
+        }
+        else
+
+        if(((results[0] >= mzx_world->vlayer_width) &&
+          (results[1] >= mzx_world->vlayer_height)) ||
+          !confirm(mzx_world, "Reduce vlayer size- Are you sure?"))
+        {
+          int size = results[0] * results[1];
+          int old_size = mzx_world->vlayer_size;
+
+          redo = 0;
+
+          // Decreasing size-- remap first
+          if(size < old_size)
+            remap_vlayer(mzx_world, results[0], results[1]);
+
+          mzx_world->vlayer_size = size;
+          mzx_world->vlayer_chars = crealloc(mzx_world->vlayer_chars, size);
+          mzx_world->vlayer_colors = crealloc(mzx_world->vlayer_colors, size);
+
+          // Increasing size-- remap after
+          if(size >= old_size)
+          {
+            // Clear new area
+            memset(mzx_world->vlayer_chars + old_size, 32, size - old_size);
+            memset(mzx_world->vlayer_colors + old_size, 7, size - old_size);
+            remap_vlayer(mzx_world, results[0], results[1]);
+          }
+
+          resized = 1;
+        }
+        break;
+      }
+    }
+  }
+  while(redo);
+
+  pop_context();
+
+  return resized;
 }
 
 //Dialog- (board info)
-//----------------------------------------------------------
-//        Board name- __________________________
-//    [ ] Can shoot               ( ) Explosions to space
-//    [ ] Can bomb                ( ) Explosions to ash
-//    [ ] Fire burns space        ( ) Explosions to fire
-//    [ ] Fire burns fakes
-//    [ ] Fire burns trees        ( ) Can save
-//    [ ] Fire burns brown        ( ) Can't save
-//    [ ] Forest to floor         ( ) Can save on sensors
-//    [ ] Collect bombs
-//    [ ] Fire burns forever      ( ) No overlay
-//    [ ] Restart if hurt         ( ) Normal overlay
-//                                ( ) Static overlay
-//    Time limit- _00000__!__!_   ( ) Transparent overlay
+//----------------------------------------------------------//
+//       Board name- __________________________
 //
-//              _OK_                  _Cancel_
+//  [ ] Can shoot               ( ) Explosions to space     //
+//  [ ] Can bomb                ( ) Explosions to ash
+//  [ ] Fire burns space        ( ) Explosions to fire
+//  [ ] Fire burns fakes
+//  [ ] Fire burns trees        ( ) Can save
+//  [ ] Fire burns brown        ( ) Can't save
+//  [ ] Forest to floor         ( ) Can save on sensors
+//  [ ] Collect bombs
+//  [ ] Fire burns forever      ( ) No overlay
+//  [ ] Restart if hurt         ( ) Normal overlay
+//  [ ] Reset board on entry    ( ) Static overlay
+//  [ ] Player locked N/S       ( ) Transparent overlay
+//  [ ] Player locked E/W
+//  [ ] Player attack locked    Time limit- _00000_[!][!]   //
 //
-//----------------------------------------------------------
+//  Charset to load-            Palette to load-
+//  _______________________[v]  _______________________[v]  //
+//
+//            _OK_  _Cancel_  _Set as defaults_             //
+//
+//----------------------------------------------------------//
 
 // Board info
 void board_info(struct world *mzx_world)
 {
   struct board *src_board = mzx_world->current_board;
   int dialog_result;
-  struct element *elements[9];
+  struct element *elements[11];
   struct dialog di;
-  int check_box_results[13] =
+  int check_box_results[14] =
   {
     src_board->can_shoot, src_board->can_bomb,
     src_board->fire_burn_space, src_board->fire_burn_fakes,
     src_board->fire_burn_trees, src_board->fire_burn_brown,
     src_board->forest_becomes, src_board->collect_bombs,
     src_board->fire_burns, src_board->restart_if_zapped,
-    src_board->player_ns_locked, src_board->player_ew_locked,
-    src_board->player_attack_locked
+    src_board->reset_on_entry, src_board->player_ns_locked,
+    src_board->player_ew_locked, src_board->player_attack_locked
   };
   const char *check_box_strings[] =
   {
     "Can shoot", "Can bomb", "Fire burns space",
     "Fire burns fakes", "Fire burns trees", "Fire burns brown",
     "Forest to floor", "Collect bombs", "Fire burns forever",
-    "Restart if hurt", "Player locked N/S", "Player locked E/W",
-    "Player attack locked"
+    "Restart if hurt", "Reset board on entry", "Player locked N/S",
+    "Player locked E/W", "Player attack locked"
   };
   const char *radio_strings_1[] =
   {
@@ -779,34 +918,67 @@ void board_info(struct world *mzx_world)
   int radio_result_3 = src_board->overlay_mode;
   int time_limit = src_board->time_limit;
   char title_string[BOARD_NAME_SIZE];
+  const char *charset_exts[] =
+  {
+    ".chr", NULL
+  };
+  const char *palette_exts[] =
+  {
+    ".pal", NULL
+  };
+  char charset_string[MAX_PATH];
+  char palette_string[MAX_PATH];
 
-  set_context(85);
+  int pos = 3;
+
+  // Prevent previous keys from carrying through.
+  force_release_all_keys();
+
+  set_context(CTX_BOARD_INFO);
 
   strcpy(title_string, src_board->board_name);
+  strcpy(charset_string, src_board->charset_path);
+  strcpy(palette_string, src_board->palette_path);
 
   do
   {
-    elements[0] = construct_button(13, 18, "OK", 0);
-    elements[1] = construct_button(19, 18, "Cancel", -1);
-    elements[2] = construct_button(29, 18, "Set as defaults", 1);
-    elements[3] = construct_input_box(9, 1, "Board name- ",
+    elements[0] = construct_button(13, 21, "OK", 0);
+    elements[1] = construct_button(19, 21, "Cancel", -1);
+    elements[2] = construct_button(29, 21, "Set as defaults", 1);
+
+    elements[3] = construct_input_box(7, 1, "Board name- ",
      BOARD_NAME_SIZE - 1, 0, title_string);
-    elements[4] = construct_check_box(5, 2, check_box_strings,
-     13, 20, check_box_results);
-    elements[5] = construct_number_box(5, 16, "Time limit- ",
-     0, 32767, 0, &time_limit);
-    elements[6] = construct_radio_button(33, 3, radio_strings_1,
+
+    elements[4] = construct_check_box(3, 3, check_box_strings,
+     14, 20, check_box_results);
+
+    elements[5] = construct_radio_button(31, 3, radio_strings_1,
      3, 19, &radio_result_1);
-    elements[7] = construct_radio_button(33, 8, radio_strings_2,
+    elements[6] = construct_radio_button(31, 7, radio_strings_2,
      3, 19, &radio_result_2);
-    elements[8] = construct_radio_button(33, 13, radio_strings_3,
+    elements[7] = construct_radio_button(31, 11, radio_strings_3,
      4, 19, &radio_result_3);
 
-    construct_dialog(&di, "Board Settings", 10, 2, 60, 21,
-     elements, 9, 3);
+    elements[8] = construct_number_box(31, 16, "Time limit- ",
+     0, 32767, 0, &time_limit);
+
+    elements[9] = construct_file_selector(3, 18, "Load charset on entry-",
+     "Select a character set...", charset_exts, "(none)", 23, 1, "",
+     charset_string, 2);
+
+    elements[10] = construct_file_selector(31, 18, "Load palette on entry-",
+     "Select a palette...", palette_exts, "(none)", 23, 1, "",
+     palette_string, 2);
+
+    construct_dialog(&di, "Board Settings", 10, 0, 60, 24,
+     elements, 11, pos);
 
     dialog_result = run_dialog(mzx_world, &di);
+    pos = di.current_element;
     destruct_dialog(&di);
+
+    // Prevent UI keys from carrying through.
+    force_release_all_keys();
 
     // Save defaults
     if(dialog_result == 1)
@@ -822,14 +994,19 @@ void board_info(struct world *mzx_world)
       conf->collect_bombs = check_box_results[7];
       conf->fire_burns_forever = check_box_results[8];
       conf->restart_if_hurt = check_box_results[9];
-      conf->player_locked_ns = check_box_results[10];
-      conf->player_locked_ew = check_box_results[11];
-      conf->player_locked_att = check_box_results[12];
+      conf->reset_on_entry = check_box_results[10];
+      conf->player_locked_ns = check_box_results[11];
+      conf->player_locked_ew = check_box_results[12];
+      conf->player_locked_att = check_box_results[13];
       conf->explosions_leave = radio_result_1;
       conf->saving_enabled = radio_result_2;
       conf->overlay_enabled = radio_result_3;
       conf->time_limit = time_limit;
+      strcpy(conf->charset_path, charset_string);
+      strcpy(conf->palette_path, palette_string);
       save_local_editor_config(conf, curr_file);
+      // Setting focus back to the board name shows the user feedback.
+      pos = 3;
     }
   } while(dialog_result > 0);
 
@@ -846,9 +1023,10 @@ void board_info(struct world *mzx_world)
     src_board->collect_bombs = check_box_results[7];
     src_board->fire_burns = check_box_results[8];
     src_board->restart_if_zapped = check_box_results[9];
-    src_board->player_ns_locked = check_box_results[10];
-    src_board->player_ew_locked = check_box_results[11];
-    src_board->player_attack_locked = check_box_results[12];
+    src_board->reset_on_entry = check_box_results[10];
+    src_board->player_ns_locked = check_box_results[11];
+    src_board->player_ew_locked = check_box_results[12];
+    src_board->player_attack_locked = check_box_results[13];
     src_board->explosions_leave = radio_result_1;
     src_board->save_mode = radio_result_2;
 
@@ -859,6 +1037,9 @@ void board_info(struct world *mzx_world)
     }
 
     src_board->time_limit = time_limit;
+
+    strcpy(src_board->charset_path, charset_string);
+    strcpy(src_board->palette_path, palette_string);
   }
 
   pop_context();
@@ -873,7 +1054,11 @@ static void global_chars(struct world *mzx_world)
   int results[24];
   struct element *elements[27];
   struct dialog di;
-  set_context(89);
+
+  // Prevent previous keys from carrying through.
+  force_release_all_keys();
+
+  set_context(CTX_CHANGE_CHAR_IDS);
 
   do
   {
@@ -941,6 +1126,9 @@ static void global_chars(struct world *mzx_world)
     // Run
     dialog_result = run_dialog(mzx_world, &di);
     destruct_dialog(&di);
+
+    // Prevent UI keys from carrying through.
+    force_release_all_keys();
 
     if(dialog_result == -1)
       break;
@@ -1035,7 +1223,10 @@ static void global_dmg(struct world *mzx_world)
   int results[22];
   int i;
 
-  set_context(90);
+  // Prevent previous keys from carrying through.
+  force_release_all_keys();
+
+  set_context(CTX_CHANGE_DAMAGE);
   set_confirm_buttons(elements);
 
   for(i = 0; i < 11; i++)
@@ -1067,6 +1258,10 @@ static void global_dmg(struct world *mzx_world)
       id_dmg[(int)dmg_ids[i]] = results[i];
     }
   }
+
+  // Prevent UI keys from carrying through.
+  force_release_all_keys();
+
   pop_context();
 }
 
@@ -1115,6 +1310,9 @@ void global_info(struct world *mzx_world)
   int dialog_result;
   int redo = 0;
 
+  // Prevent previous keys from carrying through.
+  force_release_all_keys();
+
   do
   {
     set_confirm_buttons(a_elements);
@@ -1143,17 +1341,22 @@ void global_info(struct world *mzx_world)
      a_elements, 15, 2);
 
     redo = 0;
-    set_context(86);
+    set_context(CTX_GLOBAL_SETTINGS);
 
     dialog_result = run_dialog(mzx_world, &a_di);
     destruct_dialog(&a_di);
+
+    // Prevent UI keys from carrying through.
+    force_release_all_keys();
+
+    pop_context();
 
     switch(dialog_result)
     {
       case 2:
       {
         // Returns 1 for previous
-        set_context(88);
+        set_context(CTX_GLOBAL_SETTINGS_2);
 
         if(death_board == DEATH_SAME_POS)
         {
@@ -1213,6 +1416,8 @@ void global_info(struct world *mzx_world)
         if(dialog_result == 1)
           break;
       }
+
+      /* fallthrough */
 
       case 0:
       {
@@ -1282,8 +1487,6 @@ void global_info(struct world *mzx_world)
       }
     }
   } while(redo);
-
-  pop_context();
 }
 
 void global_robot(struct world *mzx_world)
@@ -1298,15 +1501,19 @@ void global_robot(struct world *mzx_world)
   m_show();
 
   if(intake(mzx_world, cur_robot->robot_name,
-   14, 34, 13, 15, 1, 0, NULL, 0, NULL) != IKEY_ESCAPE)
+   14, 34, 13, 15, 1, 0, NULL, 0, NULL) != IKEY_ESCAPE
+   && !get_exit_status())
   {
     restore_screen();
-    set_context(87);
+    set_context(CTX_ROBO_ED);
     robot_editor(mzx_world, cur_robot);
     pop_context();
   }
   else
   {
+    // Prevent UI keys from carrying through.
+    force_release_all_keys();
+
     restore_screen();
   }
 }
@@ -1321,7 +1528,7 @@ void global_robot(struct world *mzx_world)
 * +------------------------------------+
 */
 
-int board_goto(struct world *mzx_world,
+int board_goto(struct world *mzx_world, int overlay_edit,
  int *cursor_board_x, int *cursor_board_y)
 {
   int result = 0;
@@ -1334,14 +1541,31 @@ int board_goto(struct world *mzx_world,
   int board_width = cur_board->board_width;
   int board_height = cur_board->board_height;
 
+  const char * const titles[] =
+  {
+    "Goto board location",
+    "Goto overlay location",
+    "Goto vlayer location"
+  };
+
+  // Prevent previous keys from carrying through.
+  force_release_all_keys();
+
+  if(overlay_edit == 2)
+  {
+    // Vlayer editing
+    board_width = mzx_world->vlayer_width;
+    board_height = mzx_world->vlayer_height;
+  }
+
   elements[0] = construct_button( 7, 4, "  Ok  ", 0);
-  elements[1] = construct_button(23, 4, "Cancel", 1);
+  elements[1] = construct_button(24, 4, "Cancel", 1);
   elements[2] = construct_number_box( 3, 2, "X-",
    0, board_width - 1, 0, &goto_x);
   elements[3] = construct_number_box(20, 2, "Y-",
    0, board_height - 1, 0, &goto_y);
 
-  construct_dialog(&di, "Goto board location",
+  construct_dialog(&di, titles[overlay_edit],
    21, 7, 38, 7, elements, ARRAY_SIZE(elements), 2);
 
   result = run_dialog(mzx_world, &di);
@@ -1352,6 +1576,9 @@ int board_goto(struct world *mzx_world,
     *cursor_board_x = goto_x;
     *cursor_board_y = goto_y;
   }
+
+  // Prevent UI keys from carrying through.
+  force_release_all_keys();
 
   return result;
 }

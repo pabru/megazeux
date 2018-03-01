@@ -1,16 +1,35 @@
+#version 110
+
 uniform sampler2D baseMap;
 
 varying vec2 vTexcoord;
 
+float fract_(float v)
+{
+  return clamp(fract(v + 0.001) - 0.001, 0.000, 0.999);
+}
+
+float floor_(float v)
+{
+  return floor(v + 0.001);
+}
+
 void main( void )
 {
-    vec4 tileinfo = texture2D( baseMap, vec2(vTexcoord.x, (vTexcoord.y+225.0)/256.0));
-    if(texture2D(baseMap, vec2(fract(tileinfo.z*7.96875) + (fract(vTexcoord.x*256.0)*0.03125), (floor(tileinfo.z*7.9689) + fract(vTexcoord.y) + tileinfo.w*2048.0) * 0.0546875)).x > 0.5)
+    vec4 tileinfo = texture2D( baseMap, vec2(vTexcoord.x / 2.0, (vTexcoord.y+901.0)/1024.0));
+
+    if(
+      texture2D(baseMap, vec2(
+        fract_((floor_(tileinfo.z * 63.75) + tileinfo.w * 255.0 * 64.0) / 64.0) + fract_(vTexcoord.x * 256.0) / 64.0
+        ,
+        floor_((floor_(tileinfo.z * 63.75) + tileinfo.w * 255.0 * 64.0) / 64.0) * 14.0 / 1024.0 + fract_(vTexcoord.y) * 14.0 / 1024.0
+       )
+      ).x > 0.5)
     {
-      gl_FragColor = texture2D( baseMap, vec2(tileinfo.x, 224.0/256.0));
+      gl_FragColor = texture2D( baseMap, vec2(tileinfo.x * 0.5 + fract_(tileinfo.y * 127.501), 896.0/1024.0));
     }
     else
     {
-      gl_FragColor = texture2D( baseMap, vec2(tileinfo.y, 224.0/256.0));
+      gl_FragColor = texture2D( baseMap, vec2(floor_(tileinfo.y * 127.5) / 512.0 + fract_(tileinfo.z * 63.751), 896.0/1024.0));
     }
 }

@@ -177,10 +177,8 @@ static bool process_event(SDL_Event *event)
   {
     case SDL_QUIT:
     {
-      // Stuff an escape
-      status->key = IKEY_ESCAPE;
-      status->keymap[IKEY_ESCAPE] = 1;
-      status->keypress_time = get_ticks();
+      // Set the exit status
+      status->exit = 1;
       break;
     }
 
@@ -303,10 +301,21 @@ static bool process_event(SDL_Event *event)
       fake_event.button.x = 0;
       fake_event.button.y = 0;
 
-      if(event->wheel.y < 0)
-        fake_event.button.button = MOUSE_BUTTON_WHEELDOWN;
+      if(abs(event->wheel.x) > abs(event->wheel.y))
+      {
+        if(event->wheel.x < 0)
+          fake_event.button.button = MOUSE_BUTTON_WHEELLEFT;
+        else
+          fake_event.button.button = MOUSE_BUTTON_WHEELRIGHT;
+      }
+
       else
-        fake_event.button.button = MOUSE_BUTTON_WHEELUP;
+      {
+        if(event->wheel.y < 0)
+          fake_event.button.button = MOUSE_BUTTON_WHEELDOWN;
+        else
+          fake_event.button.button = MOUSE_BUTTON_WHEELUP;
+      }
 
       SDL_PushEvent(&fake_event);
 
@@ -323,8 +332,13 @@ static bool process_event(SDL_Event *event)
       Uint16 unicode = 0;
 
 #if SDL_VERSION_ATLEAST(2,0,0)
-      // FIXME: SDL 2.0 finally implements proper key repeat.
-      // We should probably use it instead of our hand-rolled stuff.
+      // SDL 2.0 uses proper key repeat, but derives its timing from the OS.
+      // Our hand-rolled key repeat is more friendly to use than SDL 2.0's
+      // (with Windows, at least) and is consistent across all platforms.
+
+      // To enable SDL 2.0 key repeat, remove this check/break and see the
+      // update_autorepeat() function in event.c
+
       if(event->key.repeat)
         break;
 #endif
@@ -345,12 +359,9 @@ static bool process_event(SDL_Event *event)
       // Because of the way the SDL 1.2 assumption is embedded deeply in
       // the MZX event queue processor, emulate the 1.2 behaviour by waiting
       // for a TEXTINPUT event after a KEYDOWN.
-      if(SDL_WaitEventTimeout(event, 1))
-      {
-        if(event->type == SDL_TEXTINPUT)
-          unicode = event->text.text[0] | event->text.text[1] << 8;
-        else
-          SDL_PushEvent(event);
+      SDL_PumpEvents();
+      if (SDL_PeepEvents(event, 1, SDL_GETEVENT, SDL_TEXTINPUT, SDL_TEXTINPUT)) {
+        unicode = event->text.text[0] | event->text.text[1] << 8;
       }
 #else
       unicode = event->key.keysym.unicode;
@@ -414,13 +425,6 @@ static bool process_event(SDL_Event *event)
 
     case SDL_KEYUP:
     {
-#if SDL_VERSION_ATLEAST(2,0,0)
-      // FIXME: SDL 2.0 finally implements proper key repeat.
-      // We should probably use it instead of our hand-rolled stuff.
-      if(event->key.repeat)
-        break;
-#endif
-
       ckey = convert_SDL_internal(event->key.keysym.sym);
       if(!ckey)
       {
@@ -445,14 +449,7 @@ static bool process_event(SDL_Event *event)
       {
         status->caps_status = false;
       }
-
-      status->keymap[ckey] = 0;
-      if(status->key_repeat == ckey)
-      {
-        status->key_repeat = IKEY_UNKNOWN;
-        status->unicode_repeat = 0;
-      }
-      status->key_release = ckey;
+      key_release(status, ckey);
       break;
     }
 
@@ -479,19 +476,18 @@ static bool process_event(SDL_Event *event)
 
         if(stuffed_key)
         {
-          if(status->keymap[stuffed_key] == 0)
-            key_press(status, stuffed_key, stuffed_key);
+          joystick_key_press(status, stuffed_key, stuffed_key);
 
           if(last_axis == (digital_value ^ 1))
           {
-            key_release(status,
+            joystick_key_release(status,
              input.joystick_axis_map[which][axis][last_axis]);
           }
         }
       }
       else if(last_axis != -1)
       {
-        key_release(status,
+        joystick_key_release(status,
           input.joystick_axis_map[which][axis][last_axis]);
       }
 
@@ -505,8 +501,8 @@ static bool process_event(SDL_Event *event)
       int button = event->jbutton.button;
       enum keycode stuffed_key = input.joystick_button_map[which][button];
 
-      if(stuffed_key && (status->keymap[stuffed_key] == 0))
-        key_press(status, stuffed_key, stuffed_key);
+      if(stuffed_key)
+        joystick_key_press(status, stuffed_key, stuffed_key);
 
       break;
     }
@@ -518,7 +514,7 @@ static bool process_event(SDL_Event *event)
       enum keycode stuffed_key = input.joystick_button_map[which][button];
 
       if(stuffed_key)
-        key_release(status, stuffed_key);
+        joystick_key_release(status, stuffed_key);
 
       break;
     }
@@ -534,34 +530,34 @@ static bool process_event(SDL_Event *event)
       
       //if(dir & SDL_HAT_CENTERED)
       {
-        key_release(status, key_up);
-        key_release(status, key_down);
-        key_release(status, key_left);
-        key_release(status, key_right);
+        joystick_key_release(status, key_up);
+        joystick_key_release(status, key_down);
+        joystick_key_release(status, key_left);
+        joystick_key_release(status, key_right);
       }
     
       if(dir & SDL_HAT_UP)
       {
-        key_press(status, key_up, key_up);
-      //  key_release(status, key_down);
+        if (key_up)
+          joystick_key_press(status, key_up, key_up);
       }
       
       if(dir & SDL_HAT_DOWN)
       {
-        key_press(status, key_down, key_down);
-        //key_release(status, key_up);
+        if (key_down)
+          joystick_key_press(status, key_down, key_down);
       }
       
       if(dir & SDL_HAT_LEFT)
       {
-        key_press(status, key_left, key_left);
-        //key_release(status, key_right);
+        if (key_left)
+          joystick_key_press(status, key_left, key_left);
       }
       
       if(dir & SDL_HAT_RIGHT)
       {
-        key_press(status, key_right, key_right);
-        //key_release(status, key_left);
+        if (key_right)
+          joystick_key_press(status, key_right, key_right);
       }
       
       break;
@@ -585,24 +581,96 @@ bool __update_event_status(void)
   return rval;
 }
 
-void __wait_event(void)
+// This returns whether the input buffer _may_ contain a request to quit.
+// Proper polling should be performed if the answer is yes.
+bool __peek_exit_input(void)
+{
+  #if SDL_VERSION_ATLEAST(2,0,0)
+  SDL_Event events[256];
+  int num_events, i;
+  SDL_PumpEvents();
+  num_events = SDL_PeepEvents(events, 256, SDL_PEEKEVENT, SDL_FIRSTEVENT, SDL_LASTEVENT);
+  for (i = 0; i < num_events; i++) {
+    if (events[i].type == SDL_QUIT) return true;
+    if (events[i].type == SDL_KEYDOWN) {
+      SDL_KeyboardEvent *ev = (SDL_KeyboardEvent *) &events[i];
+      if (ev->keysym.sym == SDLK_ESCAPE) return true;
+      if (ev->keysym.sym == SDLK_c && ev->keysym.mod & KMOD_CTRL) return true;
+      if (ev->keysym.sym == SDLK_F4 && ev->keysym.mod & KMOD_ALT) return true;
+    }
+  }
+
+  #else /* !SDL_VERSION_ATLEAST(2,0,0) */
+
+  // FIXME: SDL supports SDL_PeepEvents but the implementation is
+  // different
+
+  #endif /* SDL_VERSION_ATLEAST(2,0,0) */
+
+  return false;
+}
+
+#if !SDL_VERSION_ATLEAST(2,0,0)
+static int SDL_WaitEventTimeout(SDL_Event *event, int timeout)
+{
+  // SDL 1.2 doesn't have SDL_WaitEventTimeout. The suggested alternative
+  // is to use timers, but this was simpler and most things won't use this
+  // SDL version anyway.
+
+  int i = timeout;
+  int anyEvent = 0;
+
+  while(timeout>0 && !anyEvent)
+  {
+    i--;
+    delay(1);
+    anyEvent = SDL_PollEvent(event);
+
+    // If an autorepeat triggers, it needs to be processed.
+    if(update_autorepeat_sdl())
+      break;
+
+    // "Fix" awful intake cursor blinking
+    if(!(i&7))
+      update_screen();
+  }
+
+  return anyEvent;
+}
+#endif
+
+void __wait_event(int timeout)
 {
   SDL_Event event;
+  int anyEvent;
 
   // FIXME: WaitEvent with MSVC hangs the render cycle, so this is, hopefully,
   //        a short-term fix.
   #ifdef MSVC_H
-    SDL_PollEvent(&event);
+    anyEvent = SDL_PollEvent(&event);
   #else
-    SDL_WaitEvent(&event);
+    if (!timeout) {
+      anyEvent = SDL_WaitEvent(&event);
+    } else {
+      anyEvent = SDL_WaitEventTimeout(&event, timeout);
+    }
   #endif
-
-  process_event(&event);
+  if (anyEvent) process_event(&event);
 }
 
-void real_warp_mouse(Uint32 x, Uint32 y)
+void real_warp_mouse(int x, int y)
 {
+  int current_x, current_y;
   SDL_Window *window = SDL_GetWindowFromID(sdl_window_id);
+
+  SDL_GetMouseState(&current_x, &current_y);
+
+  if(x < 0)
+    x = current_x;
+
+  if(y < 0)
+    y = current_y;
+
   SDL_WarpMouseInWindow(window, x, y);
 }
 

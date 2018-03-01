@@ -36,18 +36,16 @@ static Uint8 ascii_charset[CHAR_SIZE * CHARSET_SIZE];
 static Uint8 blank_charset[CHAR_SIZE * CHARSET_SIZE];
 static Uint8 smzx_charset[CHAR_SIZE * CHARSET_SIZE];
 
-void save_editor_palette(void)
+void save_editor_indices(void)
 {
-  if(graphics.screen_mode < 2)
-    memcpy(graphics.editor_backup_palette, graphics.palette,
-     sizeof(struct rgb_color) * SMZX_PAL_SIZE);
+  memcpy(graphics.editor_backup_indices, graphics.smzx_indices,
+   SMZX_PAL_SIZE * 4);
 }
 
-void load_editor_palette(void)
+void load_editor_indices(void)
 {
-  memcpy(graphics.palette, graphics.editor_backup_palette,
-   sizeof(struct rgb_color) * SMZX_PAL_SIZE);
-  set_gui_palette();
+  memcpy(graphics.smzx_indices, graphics.editor_backup_indices,
+   SMZX_PAL_SIZE * 4);
 }
 
 void save_palette(char *fname)
@@ -56,11 +54,11 @@ void save_palette(char *fname)
 
   if(pal_file)
   {
-    int num_colors = SMZX_PAL_SIZE;
+    int num_colors = PAL_SIZE;
     int i;
 
-    if(!graphics.screen_mode)
-      num_colors = PAL_SIZE;
+    if(graphics.screen_mode >= 2)
+      num_colors = SMZX_PAL_SIZE;
 
     for(i = 0; i < num_colors; i++)
     {
@@ -73,39 +71,102 @@ void save_palette(char *fname)
   }
 }
 
-void draw_char_linear(Uint8 color, Uint8 chr, Uint32 offset)
+void save_index_file(char *fname)
 {
-  draw_char_linear_ext(color, chr, offset, 256, 16);
-}
+  FILE *idx_file = fopen_unsafe(fname, "wb");
 
-void clear_screen_no_update(void)
-{
-  struct char_element *dest = graphics.text_video;
-  Uint32 i;
-
-  for(i = 0; i < (SCREEN_W * SCREEN_H); i++)
+  if(idx_file)
   {
-    // use protected charset and palette
-    dest->char_value = 177 + 256;
-    dest->fg_color = 1 + 16;
-    dest->bg_color = 0 + 16;
-    dest++;
+    int i;
+
+    for(i = 0; i < SMZX_PAL_SIZE; i++)
+    {
+      fputc(get_smzx_index(i, 0), idx_file);
+      fputc(get_smzx_index(i, 1), idx_file);
+      fputc(get_smzx_index(i, 2), idx_file);
+      fputc(get_smzx_index(i, 3), idx_file);
+    }
+
+    fclose(idx_file);
   }
 }
 
-void ec_save_set_var(char *name, Uint8 offset, Uint32 size)
+void draw_char_mixed_pal(Uint8 chr, Uint8 bg_color, Uint8 fg_color,
+ Uint32 x, Uint32 y)
+{
+  draw_char_mixed_pal_ext(chr, bg_color, fg_color, x, y, PRO_CH);
+}
+
+void draw_char_linear(Uint8 color, Uint8 chr, Uint32 offset,
+ bool use_protected_pal)
+{
+  draw_char_linear_ext(color, chr, offset, PRO_CH, use_protected_pal ? 16 : 0);
+}
+
+void ec_save_set_var(char *name, Uint16 offset, Uint32 size)
 {
   FILE *fp = fopen_unsafe(name, "wb");
 
   if(fp)
   {
-    if(size + offset > CHARSET_SIZE)
+    if(size + offset > PROTECTED_CHARSET_POSITION)
     {
-      size = CHARSET_SIZE - offset;
+      size = PROTECTED_CHARSET_POSITION - offset;
     }
 
     fwrite(graphics.charset + (offset * CHAR_SIZE), CHAR_SIZE, size, fp);
     fclose(fp);
+  }
+}
+
+void ec_change_block(Uint8 offset, Uint8 charset,
+ Uint8 width, Uint8 height, char *matrix)
+{
+  // Change a block of chars on the 32x8 charset
+  int skip;
+  int x;
+  int y;
+
+  width = CLAMP(width, 1, 32);
+  height = CLAMP(height, 1, 8);
+
+  skip = 32 - width;
+
+  // No need to bound offset (Uint8)
+  for(y = 0; y < height; y++)
+  {
+    for(x = 0; x < width; x++)
+    {
+      ec_change_char((charset * 256) + offset, matrix);
+      matrix += CHAR_SIZE;
+      offset++;
+    }
+    offset += skip;
+  }
+}
+
+void ec_read_block(Uint8 offset, Uint8 charset,
+ Uint8 width, Uint8 height, char *matrix)
+{
+  // Read a block of chars from the 32x8 charset
+  int skip;
+  int x;
+  int y;
+
+  width = CLAMP(width, 1, 32);
+  height = CLAMP(height, 1, 8);
+
+  skip = 32 - width;
+
+  for(y = 0; y < height; y++)
+  {
+    for(x = 0; x < width; x++)
+    {
+      ec_read_char((charset * 256) + offset, matrix);
+      matrix += CHAR_SIZE;
+      offset++;
+    }
+    offset += skip;
   }
 }
 
@@ -133,8 +194,10 @@ void ec_load_ascii(void)
 
 void ec_load_char_ascii(Uint32 char_number)
 {
+  Uint32 ascii_number = char_number & 0xFF;
+
   memcpy(graphics.charset + (char_number * CHAR_SIZE),
-   ascii_charset + (char_number * CHAR_SIZE), CHAR_SIZE);
+   ascii_charset + (ascii_number * CHAR_SIZE), CHAR_SIZE);
 
   // some renderers may want to map charsets to textures
   if(graphics.renderer.remap_charsets)
@@ -143,8 +206,10 @@ void ec_load_char_ascii(Uint32 char_number)
 
 void ec_load_char_mzx(Uint32 char_number)
 {
+  Uint32 default_number = char_number & 0xFF;
+
   memcpy(graphics.charset + (char_number * CHAR_SIZE),
-   graphics.default_charset + (char_number * CHAR_SIZE), CHAR_SIZE);
+   graphics.default_charset + (default_number * CHAR_SIZE), CHAR_SIZE);
 
   // some renderers may want to map charsets to textures
   if(graphics.renderer.remap_charsets)

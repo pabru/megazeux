@@ -24,6 +24,7 @@
 #include "platform.h"
 #include "graphics.h"
 #include "render.h"
+#include "render_layer.h"
 #include "util.h"
 
 static void set_colors8_mzx (struct graphics_data *graphics,
@@ -257,6 +258,42 @@ static void set_colors32_smzx3 (struct graphics_data *graphics,
   char_colors[3] = graphics->flat_intensity_palette[(base + 3) & 0xFF];
 }
 
+static void set_indices_mzx(struct graphics_data *graphics,
+ int *indices, Uint8 bg, Uint8 fg)
+{
+  indices[0] = bg;
+  indices[1] = fg;
+}
+static void set_indices_smzx(struct graphics_data *graphics,
+ int *indices, Uint8 bg, Uint8 fg)
+{
+  indices[0] = bg;
+  indices[1] = -2;
+  indices[2] = -2;
+  indices[3] = fg;
+}
+static void set_indices_smzx2(struct graphics_data *graphics,
+ int *indices, Uint8 bg, Uint8 fg)
+{
+  bg &= 0x0F;
+  fg &= 0x0F;
+  indices[0] = (bg << 4) | bg;
+  indices[1] = (bg << 4) | fg;
+  indices[2] = (fg << 4) | bg;
+  indices[3] = (fg << 4) | fg;
+}
+static void set_indices_smzx3(struct graphics_data *graphics,
+ int *indices, Uint8 bg, Uint8 fg)
+{
+  Uint8 base;
+
+  base = (bg << 4) | (fg & 0x0F);
+  indices[0] = base;
+  indices[1] = (base + 2) & 0xFF;
+  indices[2] = (base + 1) & 0xFF;
+  indices[3] = (base + 3) & 0xFF;
+}
+
 void (*const set_colors8[4])
  (struct graphics_data *, Uint32 *, Uint8, Uint8) =
 {
@@ -282,6 +319,15 @@ void (*const set_colors32[4])
   set_colors32_smzx,
   set_colors32_smzx,
   set_colors32_smzx3
+};
+
+void (*const set_indices[4])
+ (struct graphics_data *, int *, Uint8, Uint8) =
+{
+  set_indices_mzx,
+  set_indices_smzx,
+  set_indices_smzx2,
+  set_indices_smzx3
 };
 
 #ifdef CONFIG_RENDER_YUV
@@ -609,17 +655,30 @@ void set_screen_coords_centered(struct graphics_data *graphics, int x, int y,
 void get_screen_coords_scaled(struct graphics_data *graphics, int screen_x,
  int screen_y, int *x, int *y, int *min_x, int *min_y, int *max_x, int *max_y)
 {
-  int target_width = graphics->window_width;
-  int target_height = graphics->window_height;
+  int window_width = graphics->window_width;
+  int window_height = graphics->window_height;
+  int target_width;
+  int target_height;
+  int offset_x;
+  int offset_y;
 
   if(graphics->fullscreen)
   {
-    target_width = graphics->resolution_width;
-    target_height = graphics->resolution_height;
+    window_width = graphics->resolution_width;
+    window_height = graphics->resolution_height;
   }
 
-  *x = screen_x * 640 / target_width;
-  *y = screen_y * 350 / target_height;
+  target_width = window_width;
+  target_height = window_height;
+
+  fix_viewport_ratio(window_width, window_height, &target_width, &target_height,
+   graphics->ratio);
+
+  offset_x = (window_width - target_width)/2;
+  offset_y = (window_height - target_height)/2;
+
+  *x = CLAMP( (screen_x - offset_x) * 640 / target_width, 0, 639 );
+  *y = CLAMP( (screen_y - offset_y) * 350 / target_height, 0, 349 );
   *min_x = 0;
   *min_y = 0;
   *max_x = target_width - 1;
@@ -629,17 +688,27 @@ void get_screen_coords_scaled(struct graphics_data *graphics, int screen_x,
 void set_screen_coords_scaled(struct graphics_data *graphics, int x, int y,
  int *screen_x, int *screen_y)
 {
-  int target_width = graphics->window_width;
-  int target_height = graphics->window_height;
+  int window_width = graphics->window_width;
+  int window_height = graphics->window_height;
+  int target_width;
+  int target_height;
+  int offset_x;
+  int offset_y;
 
   if(graphics->fullscreen)
   {
-    target_width = graphics->resolution_width;
-    target_height = graphics->resolution_height;
+    window_width = graphics->resolution_width;
+    window_height = graphics->resolution_height;
   }
 
-  *screen_x = x * target_width / 640;
-  *screen_y = y * target_height / 350;
+  fix_viewport_ratio(window_width, window_height, &target_width, &target_height,
+   graphics->ratio);
+
+  offset_x = (window_width - target_width)/2;
+  offset_y = (window_height - target_height)/2;
+
+  *screen_x = x * target_width / 640 + offset_x;
+  *screen_y = y * target_height / 350 + offset_y;
 }
 
 #endif // CONFIG_RENDER_GL_FIXED || CONFIG_RENDER_GL_PROGRAM || CONFIG_RENDER_YUV

@@ -42,7 +42,10 @@ struct buffered_status *store_status(void)
   return &input.buffer[input.store_offset];
 }
 
-static const struct buffered_status *load_status(void)
+#ifndef CONFIG_NDS
+static
+#endif
+const struct buffered_status *load_status(void)
 {
   return (const struct buffered_status *)&input.buffer[input.load_offset];
 }
@@ -57,7 +60,6 @@ static void bump_status(void)
   // No event buffering; nothing to do
   if(input.store_offset == input.load_offset)
     return;
-
   // Some events can "echo" from the previous buffer
   memcpy(store_status(), &input.buffer[last_store_offset],
          sizeof(struct buffered_status));
@@ -314,12 +316,25 @@ static enum keycode convert_xt_internal(Uint32 key, enum keycode *second)
 
 static bool update_autorepeat(void)
 {
+  // The repeat key may not be a "valid" keycode due to the unbounded nature
+  // of joypad support.  All invalid keys use the last position because that's
+  // better than crashing.
   struct buffered_status *status = store_status();
+  enum keycode status_key =
+   MIN((unsigned int) status->key_repeat, STATUS_NUM_KEYCODES - 1);
   bool rval = false;
 
   // Repeat code
-  Uint8 last_key_state = status->keymap[status->key_repeat];
+  Uint8 last_key_state = status->keymap[status_key];
   Uint8 last_mouse_state = status->mouse_repeat_state;
+
+#ifdef CONFIG_SDL
+#if SDL_VERSION_ATLEAST(2,0,0)
+  // If you enable SDL 2.0 key repeat, uncomment these lines:
+  //last_key_state = 0;
+  //input.repeat_stack_pointer = 0;
+#endif
+#endif
 
   if(last_key_state)
   {
@@ -331,7 +346,7 @@ static bool update_autorepeat(void)
       if(ms_difference > KEY_REPEAT_START)
       {
         status->keypress_time = new_time;
-        status->keymap[status->key_repeat] = 2;
+        status->keymap[status_key] = 2;
         status->key = status->key_repeat;
         status->unicode = status->unicode_repeat;
         rval = true;
@@ -397,6 +412,18 @@ static bool update_autorepeat(void)
   return rval;
 }
 
+// event_sdl.c needs this in SDL 1.2 for catching autorepeat non-events while
+// performing wait_event with a timeout.
+
+#if defined(CONFIG_SDL)
+#if !SDL_VERSION_ATLEAST(2,0,0)
+bool update_autorepeat_sdl(void)
+{
+  return update_autorepeat();
+}
+#endif /*SDL_VERSION_ATLEAST*/
+#endif /*CONFIG_SDL*/
+
 bool update_event_status(void)
 {
   struct buffered_status *status = store_status();
@@ -406,14 +433,36 @@ bool update_event_status(void)
   status->unicode = 0;
   status->mouse_moved = 0;
   status->mouse_button = 0;
+  status->exit = 0;
 
   rval  = __update_event_status();
   rval |= update_autorepeat();
 
+#ifdef CONFIG_SDL
+#if !SDL_VERSION_ATLEAST(2,0,0)
+  // ALT+F4 - will not trigger an exit event, so set the variable manually.
+  if(status->key == IKEY_F4 && get_alt_status(keycode_internal))
+  {
+    status->key = IKEY_UNKNOWN;
+    status->unicode = 0;
+    status->exit = 1;
+  }
+#endif /*SDL_VERSION_ATLEAST*/
+#endif /*CONFIG_SDL*/
+
   return rval;
 }
 
-void wait_event(void)
+bool peek_exit_input(void)
+{
+  #ifdef CONFIG_SDL
+  return __peek_exit_input();
+  #else /* !CONFIG_SDL */
+  return false;
+  #endif /* CONFIG_SDL */
+}
+
+void wait_event(int timeout)
 {
   struct buffered_status *status = store_status();
 
@@ -421,8 +470,9 @@ void wait_event(void)
   status->unicode = 0;
   status->mouse_moved = 0;
   status->mouse_button = 0;
+  status->exit = 0;
 
-  __wait_event();
+  __wait_event(timeout);
   update_autorepeat();
 }
 
@@ -443,6 +493,21 @@ Uint32 update_event_status_delay(void)
 
   delay(delay_ticks);
   return rval;
+}
+
+void update_event_status_intake(void)
+{
+  int delay_ticks;
+
+  if(!last_update_time)
+    last_update_time = get_ticks();
+
+  delay_ticks = UPDATE_DELAY - (get_ticks() - last_update_time);
+  if (delay_ticks < 1) delay_ticks = 1;
+
+  last_update_time = get_ticks();
+
+  wait_event(delay_ticks);
 }
 
 static enum keycode emit_keysym_wrt_numlock(enum keycode key)
@@ -490,6 +555,51 @@ static enum keycode emit_keysym_wrt_numlock(enum keycode key)
   return key;
 }
 
+static enum keycode reverse_keysym_numlock(enum keycode key)
+{
+  const struct buffered_status *status = load_status();
+
+  if(status->numlock_status)
+  {
+    switch(key)
+    {
+      case IKEY_0:         return IKEY_KP0;
+      case IKEY_1:         return IKEY_KP1;
+      case IKEY_2:         return IKEY_KP2;
+      case IKEY_3:         return IKEY_KP3;
+      case IKEY_4:         return IKEY_KP4;
+      case IKEY_5:         return IKEY_KP5;
+      case IKEY_6:         return IKEY_KP6;
+      case IKEY_7:         return IKEY_KP7;
+      case IKEY_8:         return IKEY_KP8;
+      case IKEY_9:         return IKEY_KP9;
+      case IKEY_PERIOD:    return IKEY_KP_PERIOD;
+      case IKEY_RETURN:    return IKEY_KP_ENTER;
+      default: break;
+    }
+  }
+  else
+  {
+    switch(key)
+    {
+      case IKEY_INSERT:    return IKEY_KP0;
+      case IKEY_END:       return IKEY_KP1;
+      case IKEY_DOWN:      return IKEY_KP2;
+      case IKEY_PAGEDOWN:  return IKEY_KP3;
+      case IKEY_LEFT:      return IKEY_KP4;
+      case IKEY_SPACE:     return IKEY_KP5; // kinda arbitrary
+      case IKEY_RIGHT:     return IKEY_KP6;
+      case IKEY_HOME:      return IKEY_KP7;
+      case IKEY_UP:        return IKEY_KP8;
+      case IKEY_PAGEUP:    return IKEY_KP9;
+      case IKEY_DELETE:    return IKEY_KP_PERIOD;
+      case IKEY_RETURN:    return IKEY_KP_ENTER;
+      default: break;
+    }
+  }
+  return key;
+}
+
 Uint32 get_key(enum keycode_type type)
 {
   const struct buffered_status *status = load_status();
@@ -500,6 +610,9 @@ Uint32 get_key(enum keycode_type type)
       return convert_internal_xt(status->key);
 
     case keycode_internal:
+      return status->key;
+
+    case keycode_internal_wrt_numlock:
       return emit_keysym_wrt_numlock(status->key);
 
     default:
@@ -523,6 +636,10 @@ Uint32 get_key_status(enum keycode_type type, Uint32 index)
     case keycode_internal:
       return status->keymap[index];
 
+    case keycode_internal_wrt_numlock:
+      return status->keymap[index] ||
+        status->keymap[reverse_keysym_numlock(index)];
+
     default:
       return 0;
   }
@@ -540,6 +657,9 @@ Uint32 get_last_key(enum keycode_type type)
     case keycode_internal:
       return status->key_pressed;
 
+    case keycode_internal_wrt_numlock:
+      return emit_keysym_wrt_numlock(status->key_pressed);
+
     default:
       return 0;
   }
@@ -556,6 +676,9 @@ Uint32 get_last_key_released(enum keycode_type type)
 
     case keycode_internal:
       return status->key_release;
+
+    case keycode_internal_wrt_numlock:
+      return emit_keysym_wrt_numlock(status->key_release);
 
     default:
       return 0;
@@ -651,7 +774,7 @@ void warp_mouse_x(Uint32 x)
   status->real_mouse_x = mx;
 
   set_screen_coords(mx, status->real_mouse_y, &mx_real, &my_real);
-  real_warp_mouse(mx_real, my_real);
+  real_warp_mouse(mx_real, -1);
 }
 
 void warp_mouse_y(Uint32 y)
@@ -663,7 +786,7 @@ void warp_mouse_y(Uint32 y)
   status->real_mouse_y = my;
 
   set_screen_coords(status->real_mouse_x, my, &mx_real, &my_real);
-  real_warp_mouse(mx_real, my_real);
+  real_warp_mouse(-1, my_real);
 }
 
 void warp_real_mouse_x(Uint32 mx)
@@ -675,7 +798,7 @@ void warp_real_mouse_x(Uint32 mx)
   status->real_mouse_x = mx;
 
   set_screen_coords(mx, status->real_mouse_y, &mx_real, &my_real);
-  real_warp_mouse(mx_real, my_real);
+  real_warp_mouse(mx_real, -1);
 }
 
 void warp_real_mouse_y(Uint32 my)
@@ -687,7 +810,7 @@ void warp_real_mouse_y(Uint32 my)
   status->real_mouse_y = my;
 
   set_screen_coords(status->real_mouse_x, my, &mx_real, &my_real);
-  real_warp_mouse(mx_real, my_real);
+  real_warp_mouse(-1, my_real);
 }
 
 void force_last_key(enum keycode_type type, int val)
@@ -704,6 +827,7 @@ void force_last_key(enum keycode_type type, int val)
     }
 
     case keycode_internal:
+    case keycode_internal_wrt_numlock:
     {
       status->key_pressed = (enum keycode)val;
       break;
@@ -712,6 +836,20 @@ void force_last_key(enum keycode_type type, int val)
     default:
       break;
   }
+}
+
+void force_release_all_keys(void)
+{
+  struct buffered_status *status = store_status();
+
+  force_last_key(keycode_internal, 0);
+  memset(status->keymap, 0, sizeof(status->keymap));
+
+  status->mouse_button = 0;
+  status->mouse_repeat = 0;
+  status->mouse_button_state = 0;
+  status->mouse_repeat_state = 0;
+  status->mouse_drag_state = 0;
 }
 
 bool get_alt_status(enum keycode_type type)
@@ -779,19 +917,64 @@ void key_press(struct buffered_status *status, enum keycode key,
 void key_release(struct buffered_status *status, enum keycode key)
 {
   status->keymap[key] = 0;
-  status->key_repeat = IKEY_UNKNOWN;
-  status->unicode_repeat = 0;
   status->key_release = key;
+
+  if(status->key_repeat == key)
+  {
+    status->key_repeat = IKEY_UNKNOWN;
+    status->unicode_repeat = 0;
+  }
 }
 
-void wait_for_key_release(Uint32 index)
+/* Additional checks for joystick button presses, especially for
+*  arbitrary out-of-bounds keycodes.
+*/
+void joystick_key_press(struct buffered_status *status,
+ enum keycode key, Uint16 unicode_key)
 {
-  while(get_key_status(keycode_internal, index) >= 1)
-    update_event_status_delay();
+  enum keycode status_key = MIN((unsigned int) key, STATUS_NUM_KEYCODES - 1);
+
+  if(status_key && (status->keymap[status_key] == 0))
+  {
+    status->keymap[status_key] = 1;
+    status->key_pressed = key;
+    status->key = key;
+    status->unicode = unicode_key;
+    status->key_repeat = key;
+    status->unicode_repeat = unicode_key;
+    status->keypress_time = get_ticks();
+    status->key_release = IKEY_UNKNOWN;
+  }
 }
 
-void wait_for_mouse_release(Uint32 mouse_button)
+void joystick_key_release(struct buffered_status *status,
+  enum keycode key)
 {
-  while(get_mouse_status())
-    update_event_status_delay();
+  enum keycode status_key = MIN((unsigned int) key, STATUS_NUM_KEYCODES - 1);
+
+  if(status_key)
+  {
+    status->keymap[status_key] = 0;
+    status->key_release = key;
+
+    if(status->key_repeat == status_key)
+    {
+      status->key_repeat = IKEY_UNKNOWN;
+      status->unicode_repeat = 0;
+    }
+  }
+}
+
+bool get_exit_status(void)
+{
+  const struct buffered_status *status = load_status();
+  return status->exit;
+}
+
+bool set_exit_status(bool value)
+{
+  struct buffered_status *status = store_status();
+  bool exit = status->exit;
+  status->exit = value;
+  return exit;
 }

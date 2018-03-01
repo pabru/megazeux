@@ -51,6 +51,7 @@ struct audio_stream
   void (* set_position)(struct audio_stream *a_src, Uint32 pos);
   Uint32 (* get_order)(struct audio_stream *a_src);
   Uint32 (* get_position)(struct audio_stream *a_src);
+  Uint32 (* get_length)(struct audio_stream *a_src);
   void (* destruct)(struct audio_stream *a_src);
 };
 
@@ -100,6 +101,8 @@ struct audio
 
   Uint32 output_frequency;
   Uint32 master_resample_mode;
+  Sint32 max_simultaneous_samples;
+  Sint32 max_simultaneous_samples_config;
 
   struct audio_stream *primary_stream;
   struct pc_speaker_stream *pcs_stream;
@@ -117,16 +120,19 @@ struct audio
 
 extern struct audio audio;
 
+CORE_LIBSPEC void set_max_samples(int max_samples);
+CORE_LIBSPEC int get_max_samples(void);
+
 CORE_LIBSPEC void init_audio(struct config_info *conf);
 CORE_LIBSPEC void quit_audio(void);
+CORE_LIBSPEC int load_module(char *filename, bool safely, int volume);
 CORE_LIBSPEC void end_module(void);
-CORE_LIBSPEC int  load_board_module(struct board *src_board);
 CORE_LIBSPEC void play_sample(int freq, char *filename, bool safely);
+CORE_LIBSPEC void volume_module(int vol);
 
 void end_sample(void);
 void jump_module(int order);
 int get_order(void);
-void volume_module(int vol);
 void module_exit(void);
 void module_init(void);
 void spot_sample(int freq, int sample);
@@ -134,6 +140,7 @@ void shift_frequency(int freq);
 int get_frequency(void);
 void set_position(int pos);
 int get_position(void);
+int audio_get_length(void);
 int free_sam_cache(char clear_all);
 void fix_global_volumes(void);
 void sound(int frequency, int duration);
@@ -153,12 +160,7 @@ void audio_callback(Sint16 *stream, int len);
 void init_audio_platform(struct config_info *conf);
 void quit_audio_platform(void);
 
-#ifdef CONFIG_EDITOR
-CORE_LIBSPEC int load_module(char *filename, bool safely, int volume);
-#endif
-
 #ifdef CONFIG_MODPLUG
-int check_ext_for_sam_and_convert(const char *filename, char *new_file);
 int check_ext_for_gdm_and_convert(const char *filename, char *new_file);
 #define __sam_to_wav_maybe_static __audio_c_maybe_static
 #else
@@ -167,7 +169,7 @@ int check_ext_for_gdm_and_convert(const char *filename, char *new_file);
 
 /*** these should only be exported for audio plugins */
 
-#if defined(CONFIG_MODPLUG) || defined(CONFIG_MIKMOD)
+#if defined(CONFIG_AUDIO_MOD_SYSTEM)
 
 void sampled_set_buffer(struct sampled_stream *s_src);
 void sampled_mix_data(struct sampled_stream *s_src, Sint32 *dest_buffer,
@@ -185,10 +187,11 @@ void construct_audio_stream(struct audio_stream *a_src,
  void (* set_position)(struct audio_stream *a_src, Uint32 pos),
  Uint32 (* get_order)(struct audio_stream *a_src),
  Uint32 (* get_position)(struct audio_stream *a_src),
+ Uint32 (* get_length)(struct audio_stream *a_src),
  void (* destruct)(struct audio_stream *a_src),
  Uint32 volume, Uint32 repeat);
 
-#endif // CONFIG_MODPLUG || CONFIG_MIKMOD
+#endif // CONFIG_AUDIO_MOD_SYSTEM
 
 /*** end audio plugins exports */
 
@@ -201,10 +204,11 @@ static inline void set_sound_volume(int volume) {}
 static inline void set_music_on(int val) {}
 static inline void set_sfx_on(int val) {}
 static inline void set_sfx_volume(int volume) {}
+static inline void set_max_samples(int max_samples) {}
+static inline int get_max_samples(void) { return 0; }
 static inline void end_sample(void) {}
 static inline void end_module(void) {}
-static inline void load_module(char *filename, bool safely, int volume) {}
-static inline int load_board_module(struct board *src_board) { return 1; }
+static inline int load_module(char *filename, bool safely, int volume) { return 1; }
 static inline void volume_module(int vol) {}
 static inline void set_position(int pos) {}
 static inline void jump_module(int order) {}
@@ -219,6 +223,8 @@ static inline int get_sfx_volume(void) { return 0; }
 static inline int get_position(void) { return 0; }
 static inline int get_order(void) { return 0; }
 static inline int get_frequency(void) { return 0; }
+static inline int audio_get_length(void) { return 0; }
+
 
 #endif // CONFIG_AUDIO
 

@@ -2,7 +2,7 @@
  *
  * Copyright (C) 2004 Gilead Kutnick <exophase@adelphia.net>
  * Copyright (C) 2008 Alistair John Strachan <alistair@devzero.co.uk>
- * Copyright (C) 2012 Alice Lauren Rowan <petrifiedrowan@gmail.com>
+ * Copyright (C) 2012 Alice Rowan <petrifiedrowan@gmail.com>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
@@ -19,18 +19,22 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
-//FIXME: Strings/counters with special chars in names -- maybe don't bother?
-
 #include "debug.h"
+
+#include "char_ed.h"
+#include "pal_ed.h"
+#include "robo_debug.h"
 #include "window.h"
 
-#include "../graphics.h"
+#include "../audio.h"
 #include "../counter.h"
-#include "../sprite.h"
-#include "../window.h"
-#include "../intake.h"
 #include "../event.h"
+#include "../graphics.h"
+#include "../intake.h"
+#include "../sprite.h"
+#include "../str.h"
 #include "../util.h"
+#include "../window.h"
 #include "../world.h"
 
 #include <string.h>
@@ -178,36 +182,44 @@ static void unescape_string(char *buf, int *len)
  ***********************/
 
 // We'll read off of these when we construct the tree
-int num_world_vars = 20;
-const char *world_var_list[20] = {
+static const char *config_var_list[] = {
+  "random_seed0",
+  "random_seed1",
+};
+
+static const char *world_var_list[] = {
   "bimesg", //no read
-  "blue_value",
-  "green_value",
-  "red_value",
   "c_divisions",
   "commands",
+  "commands_stop",
   "divider",
   "fread_delimiter", //no read
   "fwrite_delimiter", //no read
+  "max_samples",
   "mod_frequency",
+  "mod_length*",
   "mod_name*",
   "mod_order",
   "mod_position",
   "multiplier",
   "mzx_speed",
+  "smzx_message",
   "smzx_mode*",
   "spacelock", //no read
   "vlayer_size*",
-  "vlayer_height*",
   "vlayer_width*",
-  };
-int num_board_vars = 11;
-const char *board_var_list[11] = {
+  "vlayer_height*",
+};
+
+static const char *board_var_list[] = {
   "board_name*",
-  "board_h*",
+  "board_mod*", //no read
   "board_w*",
-//  "input*",
-//  "inputsize*",
+  "board_h*",
+  "input", // as a counter
+  "input*", // as a string (no read function; handled in interpolation code)
+  "inputsize",
+  "key",
   "overlay_mode*",
   "playerfacedir",
   "playerlastdir",
@@ -216,13 +228,18 @@ const char *board_var_list[11] = {
   "scrolledx*",
   "scrolledy*",
   "timereset",
+  "volume", //no read or write
 };
+
 // Locals are added onto the end later.
-int num_robot_vars = 11;
-const char *robot_var_list[11] = {
+static const char *robot_var_list[] = {
   "robot_name*",
+  "commands_total", //no read or write
+  "commands_cycle*", //no read
   "bullettype",
   "lava_walk",
+  "goop_walk",
+  "lockself", //no read or write
   "loopcount",
   "thisx*",
   "thisy*",
@@ -232,10 +249,10 @@ const char *robot_var_list[11] = {
   "horizpld*",
   "vertpld*",
 };
+
 // Sprite parent has yorder, collisions, and clist#
 // The following will all be added to the end of 'sprN_'
-int num_sprite_vars = 15;
-const char *sprite_var_list[15] = {
+static const char *sprite_var_list[] = {
   "x",
   "y",
   "refx",
@@ -246,15 +263,44 @@ const char *sprite_var_list[15] = {
   "cy",
   "cwidth",
   "cheight",
-  "ccheck",
-  "off",
-  "overlaid",
-  "static",
-  "vlayer",
+  "ccheck", // no read
+  "off", // no read
+  "offset",
+  "overlay", // no read
+  "static", // no read
+  "tcol",
+  "unbound",
+  "vlayer", // no read
 };
+
+static int num_config_vars = ARRAY_SIZE(config_var_list);
+static int num_world_vars = ARRAY_SIZE(world_var_list);
+static int num_board_vars = ARRAY_SIZE(board_var_list);
+static int num_robot_vars = ARRAY_SIZE(robot_var_list);
+static int num_sprite_vars = ARRAY_SIZE(sprite_var_list);
+
+#define match_counter(_name) (strlen(_name) == len && !strcasecmp(name, _name))
+
+int get_counter_safe(struct world *mzx_world, const char *name, int id)
+{
+  // This is a safe wrapper for get_counter(). Some counters, when read,
+  // could alter world data in a way we don't want to happen here.
+  // So detect and block them.
+
+  size_t len = strlen(name);
+
+  if(match_counter("fread"))          return -1;
+  if(match_counter("fread_counter"))  return -1;
+
+  return get_counter(mzx_world, name, id);
+}
+
+#define match_var(_name) (!strcmp(var, _name))
 
 static void read_var(struct world *mzx_world, char *var_buffer)
 {
+  struct board *cur_board = mzx_world->current_board;
+
   int int_value = 0;
   char *char_value = NULL;
   char buf[SVALUE_SIZE + 1] = { 0 };
@@ -280,14 +326,15 @@ static void read_var(struct world *mzx_world, char *var_buffer)
     }
     else
     {
-      int_value = get_counter(mzx_world, var, 0);
+      int_value = get_counter_safe(mzx_world, var, 0);
       if(int_value == 0)
         var[-1] = 0;
     }
   }
-  else
+
   // It's a built-in var.  Since some of these don't have
   // read functions, we have to map several manually.
+  else
   {
     size_t len = strlen(var);
     char *real_var = cmalloc(len + 1);
@@ -299,78 +346,163 @@ static void read_var(struct world *mzx_world, char *var_buffer)
     if(real_var[len - 1] == '*')
       real_var[len - 1] = 0;
 
-    if(!strcmp(real_var, "bimesg"))
+    if(match_var("bimesg"))
+    {
       int_value = mzx_world->bi_mesg_status;
+    }
     else
-    if(!strcmp(real_var, "spacelock"))
+
+    if(match_var("spacelock"))
+    {
       int_value = mzx_world->bi_shoot_status;
+    }
     else
-    if(!strcmp(real_var, "fread_delimiter"))
+
+    if(match_var("fread_delimiter"))
+    {
       int_value = mzx_world->fread_delimiter;
+    }
     else
-    if(!strcmp(real_var, "fwrite_delimiter"))
+
+    if(match_var("fwrite_delimiter"))
+    {
       int_value = mzx_world->fwrite_delimiter;
+    }
     else
-    if(!strcmp(real_var, "mod_name"))
+
+    if(match_var("mod_name*"))
     {
       char_value = mzx_world->real_mod_playing;
       int_value = strlen(char_value);
     }
     else
-    if(!strcmp(real_var, "board_name"))
-    {
-      char_value = mzx_world->current_board->board_name;
-      int_value = strlen(char_value);
-    }
-    else
-    if(!strcmp(real_var, "robot_name"))
-    {
-      char_value = mzx_world->current_board->robot_list[index]->robot_name;
-      int_value = strlen(char_value);
-    }
-    else
-    if(!strncmp(real_var, "spr", 3))
-    {
-      char *sub_var;
-      int sprite_num = strtol(real_var + 3, &sub_var, 10) & (MAX_SPRITES - 1);
 
-      if(!strcmp(sub_var, "_off"))
+    if(match_var("board_name*"))
+    {
+      char_value = cur_board->board_name;
+      int_value = strlen(char_value);
+    }
+    else
+
+    if(match_var("board_mod*"))
+    {
+      char_value = cur_board->mod_playing;
+      int_value = strlen(char_value);
+    }
+    else
+
+    if(match_var("input*"))
+    {
+      // the starred version of input is the input string!
+      char_value = cur_board->input_string;
+      int_value = strlen(char_value);
+    }
+    else
+
+    if(match_var("volume"))
+    {
+      int_value = cur_board->volume;
+    }
+    else
+
+    if(match_var("robot_name*"))
+    {
+#ifdef CONFIG_DEBYTECODE
+      // In debytecode, it is possible to encounter situations where
+      // debug information is missing, so add a display for it.
+
+      struct robot *cur_robot = cur_board->robot_list[index];
+      const char *yn[] = { "N", "Y" };
+
+      memset(buf, ' ', SVALUE_SIZE);
+      snprintf(buf, strlen(cur_robot->robot_name), cur_robot->robot_name);
+      sprintf(buf + SVALUE_SIZE - CVALUE_SIZE, "(debug: %s)",
+       yn[cur_robot->command_map != NULL]);
+
+      buf[SVALUE_SIZE] = 0;
+      char_value = buf;
+#else
+      char_value = cur_board->robot_list[index]->robot_name;
+#endif
+
+      int_value = strlen(char_value);
+    }
+    else
+
+    if(match_var("commands_total"))
+    {
+      int_value = cur_board->robot_list[index]->commands_total;
+    }
+    else
+
+    if(match_var("commands_cycle*"))
+    {
+      int_value = cur_board->robot_list[index]->commands_cycle;
+    }
+    else
+
+    if(match_var("lockself"))
+    {
+      int_value = cur_board->robot_list[index]->is_locked;
+    }
+    else
+
+    if(!strncmp(var, "spr", 3))
+    {
+      int sprite_num = strtol(var + 3, &var, 10) & (MAX_SPRITES - 1);
+
+      if(match_var("_off"))
       {
         if(!(mzx_world->sprite_list[sprite_num]->flags & SPRITE_INITIALIZED))
           int_value = 1;
       }
       else
-      if(!strcmp(sub_var, "_overlaid"))
+
+      if(match_var("_overlay"))
       {
         if(mzx_world->sprite_list[sprite_num]->flags & SPRITE_OVER_OVERLAY)
           int_value = 1;
       }
       else
-      if(!strcmp(sub_var, "_static"))
+
+      if(match_var("_static"))
       {
         if(mzx_world->sprite_list[sprite_num]->flags & SPRITE_STATIC)
           int_value = 1;
       }
       else
-      if(!strcmp(sub_var, "_vlayer"))
+
+      if(match_var("_vlayer"))
       {
         if(mzx_world->sprite_list[sprite_num]->flags & SPRITE_VLAYER)
           int_value = 1;
       }
       else
-      if(!strcmp(sub_var, "_ccheck"))
+
+      if(match_var("_ccheck"))
       {
-        if(mzx_world->sprite_list[sprite_num]->flags & SPRITE_CHAR_CHECK)
-          int_value = 1;
-        else
-        if(mzx_world->sprite_list[sprite_num]->flags & SPRITE_CHAR_CHECK2)
-          int_value = 2;
+        int flags = mzx_world->sprite_list[sprite_num]->flags;
+        int_value = 0;
+
+        if(flags & SPRITE_CHAR_CHECK)
+          int_value |= 1;
+
+        if(flags & SPRITE_CHAR_CHECK2)
+          int_value |= 2;
       }
-      else // Matched sprN but no var matched
-        int_value = get_counter(mzx_world, real_var, index);
+
+      // Matched sprN but no var matched
+      else
+      {
+        int_value = get_counter_safe(mzx_world, real_var, index);
+      }
     }
-    else // No special var matched
-      int_value = get_counter(mzx_world, real_var, index);
+
+    // No special var matched
+    else
+    {
+      int_value = get_counter_safe(mzx_world, real_var, index);
+    }
 
     free(real_var);
   }
@@ -380,6 +512,7 @@ static void read_var(struct world *mzx_world, char *var_buffer)
     memcpy(var_buffer + SVALUE_COL_OFFSET, char_value, MIN(SVALUE_SIZE, int_value));
     var_buffer[SVALUE_COL_OFFSET + MIN(SVALUE_SIZE, int_value)] = '\0';
   }
+
   else
   {
     snprintf(var_buffer + CVALUE_COL_OFFSET, CVALUE_SIZE, "%i", int_value);
@@ -412,10 +545,41 @@ static void write_var(struct world *mzx_world, char *var_buffer, int int_val, ch
   else
   {
     // It's a built-in var
+    struct board *cur_board = mzx_world->current_board;
     int index = var[-1];
 
     if(var[strlen(var) - 1] != '*')
-      set_counter(mzx_world, var, int_val, index);
+    {
+      // Special cases: not an actual counter, but needs to be writable
+
+      if(match_var("commands_total"))
+      {
+        cur_board->robot_list[index]->commands_total = int_val;
+      }
+      else
+
+      if(match_var("volume"))
+      {
+        int_val = int_val & 255;
+
+        cur_board->volume = int_val;
+        cur_board->volume_target = int_val;
+
+        volume_module(int_val);
+      }
+      else
+
+      if(match_var("lockself"))
+      {
+        cur_board->robot_list[index]->is_locked = (int_val != 0);
+      }
+
+      // Everything else
+      else
+      {
+        set_counter(mzx_world, var, int_val, index);
+      }
+    }
   }
 
   // Now update var_buffer to reflect the new value.
@@ -811,9 +975,11 @@ static int find_variable(struct world *mzx_world, struct debug_node *node,
           value = node->counters[i] + CVALUE_COL_OFFSET;
         else
         {
-          if(!strcmp(var, "robot_name*") ||
-             !strcmp(var, "board_name*") ||
-             !strcmp(var, "mod_name*"))
+          if(match_var("robot_name*") ||
+             match_var("board_name*") ||
+             match_var("board_mod*") ||
+             match_var("mod_name*") ||
+             match_var("input*"))
              value = node->counters[i] + SVALUE_COL_OFFSET;
           else
             value = node->counters[i] + CVALUE_COL_OFFSET;
@@ -917,7 +1083,11 @@ static int start_var_search(struct world *mzx_world, struct debug_node *node,
     stop_var = find_last_var(node);
   }
 
-  while(!result)
+  result = find_variable(mzx_world, node, search_var, search_node,
+   search_pos, match_text, index, match_length, search_flags, &stop_var);
+
+  // Wrap? Try again from the start
+  if(!result && (search_flags & VAR_SEARCH_WRAP))
     result = find_variable(mzx_world, node, search_var, search_node,
      search_pos, match_text, index, match_length, search_flags, &stop_var);
 
@@ -927,19 +1097,6 @@ static int start_var_search(struct world *mzx_world, struct debug_node *node,
 /**********************************/
 /******* MAKE THE TREE CODE *******/
 /**********************************/
-
-static int counter_sort_fcn(const void *a, const void *b)
-{
-  return strcasecmp(
-   (*(const struct counter **)a)->name,
-   (*(const struct counter **)b)->name);
-}
-static int string_sort_fcn(const void *a, const void *b)
-{
-  return strcasecmp(
-   (*(const struct string **)a)->name,
-   (*(const struct string **)b)->name);
-}
 
 // Create new counter lists.
 // (Re)make the child nodes
@@ -959,9 +1116,10 @@ static void repopulate_tree(struct world *mzx_world, struct debug_node *root)
   struct debug_node *counters = &(root->nodes[0]);
   struct debug_node *strings = &(root->nodes[1]);
   struct debug_node *sprites = &(root->nodes[2]);
-  struct debug_node *world = &(root->nodes[3]);
-  struct debug_node *board = &(root->nodes[4]);
-  struct debug_node *robots = &(root->nodes[5]);
+  struct debug_node *config = &(root->nodes[3]);
+  struct debug_node *world = &(root->nodes[4]);
+  struct debug_node *board = &(root->nodes[5]);
+  struct debug_node *robots = &(root->nodes[6]);
 
   int num_counter_nodes = 27;
   int num_string_nodes = 27;
@@ -979,17 +1137,14 @@ static void repopulate_tree(struct world *mzx_world, struct debug_node *root)
 
   struct robot **robot_list = mzx_world->current_board->robot_list;
 
-  qsort(
-   mzx_world->counter_list, (size_t)num_counters, sizeof(struct counter *),
-   counter_sort_fcn);
-  qsort(
-   mzx_world->string_list, (size_t)num_strings, sizeof(struct string *),
-   string_sort_fcn);
+  sort_counter_list(mzx_world->counter_list, mzx_world->num_counters);
+  sort_string_list(mzx_world->string_list, mzx_world->num_strings);
 
   // We want to start off on a clean slate here
   clear_debug_node(counters, true);
   clear_debug_node(strings, true);
   clear_debug_node(sprites, true);
+  clear_debug_node(config, true);
   clear_debug_node(world, true);
   clear_debug_node(board, true);
   clear_debug_node(robots, true);
@@ -1045,12 +1200,9 @@ static void repopulate_tree(struct world *mzx_world, struct debug_node *root)
   /* Strings */
   /***********/
 
-  // IMPORTANT: Make sure we reset each string's list_ind since we just
-  // sorted them, it's only polite (and also will make MZX not crash)
   for(i = 0, n = 0; i < num_strings; i++)
   {
     char first = tolower((int)mzx_world->string_list[i]->name[1]);
-    mzx_world->string_list[i]->list_ind = i;
 
     // We need to switch child nodes
     if((first > n+96 && n<27) || i == 0)
@@ -1147,7 +1299,17 @@ static void repopulate_tree(struct world *mzx_world, struct debug_node *root)
   else
     free(sprite_nodes);
 
-  // And finish sprites
+  /**********/
+  /* Config */
+  /**********/
+
+  config->counters = ccalloc(num_config_vars, sizeof(char *));
+  for(n = 0; n < num_config_vars; n++)
+  {
+    build_var_buffer( &(config->counters[n]), config_var_list[n], 0, NULL, 0);
+    read_var(mzx_world, config->counters[n]);
+  }
+  config->num_counters = num_config_vars;
 
   /*********/
   /* World */
@@ -1202,8 +1364,9 @@ static void repopulate_tree(struct world *mzx_world, struct debug_node *root)
        robot->local[(n-1)&31], NULL, i&255);
     }
 
-    snprintf(var, 14, "%i:%s", i, robot_list[i]->robot_name);
-    strcpy(robot_nodes[j].name, var);
+    snprintf(var, 20, "%i:%s", i, robot_list[i]->robot_name);
+    strncpy(robot_nodes[j].name, var, 14);
+    robot_nodes[j].name[14] = 0;
     robot_nodes[j].parent = robots;
     robot_nodes[j].num_nodes = 0;
     robot_nodes[j].nodes = NULL;
@@ -1224,7 +1387,7 @@ static void repopulate_tree(struct world *mzx_world, struct debug_node *root)
 // Create the base tree structure, except for sprites and robots
 static void build_debug_tree(struct world *mzx_world, struct debug_node *root)
 {
-  int num_root_nodes = 6;
+  int num_root_nodes = 7;
   struct debug_node *root_nodes =
    ccalloc(num_root_nodes, sizeof(struct debug_node));
 
@@ -1277,6 +1440,18 @@ static void build_debug_tree(struct world *mzx_world, struct debug_node *root)
     NULL
   };
 
+  struct debug_node config = {
+    "Universal",
+    false,
+    true,
+    false,
+    0,
+    0,
+    root,
+    NULL,
+    NULL
+  };
+
   struct debug_node world = {
     "World",
     false,
@@ -1317,9 +1492,10 @@ static void build_debug_tree(struct world *mzx_world, struct debug_node *root)
   memcpy(&root_nodes[0], &counters, sizeof(struct debug_node));
   memcpy(&root_nodes[1], &strings, sizeof(struct debug_node));
   memcpy(&root_nodes[2], &sprites, sizeof(struct debug_node));
-  memcpy(&root_nodes[3], &world, sizeof(struct debug_node));
-  memcpy(&root_nodes[4], &board, sizeof(struct debug_node));
-  memcpy(&root_nodes[5], &robots, sizeof(struct debug_node));
+  memcpy(&root_nodes[3], &config, sizeof(struct debug_node));
+  memcpy(&root_nodes[4], &world, sizeof(struct debug_node));
+  memcpy(&root_nodes[5], &board, sizeof(struct debug_node));
+  memcpy(&root_nodes[6], &robots, sizeof(struct debug_node));
 
   repopulate_tree(mzx_world, root);
 }
@@ -1349,7 +1525,7 @@ static void input_counter_value(struct world *mzx_world, char *var_buffer)
     if(var[-2])
     {
       snprintf(name, 69, "Edit: counter %s", var);
-      sprintf(new_value, "%d", get_counter(mzx_world, var, id));
+      sprintf(new_value, "%d", get_counter_safe(mzx_world, var, id));
     }
     else
     {
@@ -1372,7 +1548,7 @@ static void input_counter_value(struct world *mzx_world, char *var_buffer)
   write_string(name, 6, 12, DI_DEBUG_LABEL, 0);
 
   if(intake(mzx_world, new_value, 68, 6, 13, 15, 1, 0,
-   NULL, 0, NULL) != IKEY_ESCAPE)
+   NULL, 0, NULL) != IKEY_ESCAPE && !get_exit_status())
   {
     if(var[0] == '$')
     {
@@ -1428,6 +1604,9 @@ static int search_dialog(struct world *mzx_world,
   int wrap =     (*search_flags & VAR_SEARCH_WRAP) > 0;
   int local =    (*search_flags & VAR_SEARCH_LOCAL) > 0;
 
+  // Prevent previous keys from carrying through.
+  force_release_all_keys();
+
   elements[0] = construct_input_box( 2, 1, "Search: ", VAR_SEARCH_MAX, 0, string);
   elements[1] = construct_check_box( 2, 2, name_opt,    1, strlen(name_opt[0]),    &names);
   elements[2] = construct_check_box(20, 2, value_opt,   1, strlen(value_opt[0]),   &values);
@@ -1447,7 +1626,10 @@ static int search_dialog(struct world *mzx_world,
    (wrap * VAR_SEARCH_WRAP) + (local * VAR_SEARCH_LOCAL);
   
   destruct_dialog(&di);
-  
+
+  // Prevent UI keys from carrying through.
+  force_release_all_keys();
+
   return result;
 }
 
@@ -1462,6 +1644,9 @@ static int new_counter_dialog(struct world *mzx_world, char *name)
   struct element *elements[3];
   struct dialog di;
 
+  // Prevent previous keys from carrying through.
+  force_release_all_keys();
+
   elements[0] = construct_input_box(2, 2, "Name:", VAR_ADD_MAX, 0, name);
   elements[1] = construct_button(9, 4, "Confirm", 0);
   elements[2] = construct_button(23, 4, "Cancel", -1);
@@ -1473,6 +1658,9 @@ static int new_counter_dialog(struct world *mzx_world, char *name)
   result = run_dialog(mzx_world, &di);
 
   destruct_dialog(&di);
+
+  // Prevent UI keys from carrying through.
+  force_release_all_keys();
 
   if(!result && (strlen(name) > 0))
   {
@@ -1502,7 +1690,7 @@ static int new_counter_dialog(struct world *mzx_world, char *name)
     // Counter
     else
     {
-      if(!get_counter(mzx_world, name, 0))
+      if(!get_counter_safe(mzx_world, name, 0))
         set_counter(mzx_world, name, 0, 0);
 
       return 1;
@@ -1512,10 +1700,20 @@ static int new_counter_dialog(struct world *mzx_world, char *name)
   return 0;
 }
 
-/**********************/
-/* It's morphin' time */
-/**********************/
+/********************/
+/* Counter Debugger */
+/********************/
 
+/*-3 - Repeat search
+ *-2 - Update selected tree
+ *-1 - Close
+ * 0 - Selected var in var list
+ * 1 - Selected node in tree list
+ * 2 - Search
+ * 3 - Add new counter
+ * 4 - Hide empties
+ * 5 - Export
+ */
 int last_node_selected = 0;
 
 static int counter_debugger_idle_function(struct world *mzx_world,
@@ -1531,6 +1729,26 @@ static int counter_debugger_idle_function(struct world *mzx_world,
 
   switch(key)
   {
+    // Char editor
+    case IKEY_c:
+    {
+      if(get_alt_status(keycode_internal))
+      {
+        char_editor(mzx_world);
+        return 0;
+      }
+      break;
+    }
+    // Palette editor
+    case IKEY_e:
+    {
+      if(get_alt_status(keycode_internal))
+      {
+        palette_editor(mzx_world);
+        return 0;
+      }
+      break;
+    }
     // Search dialog
     case IKEY_f:
     {
@@ -1580,7 +1798,9 @@ static int counter_debugger_idle_function(struct world *mzx_world,
   return key;
 }
 
-struct debug_node root;
+static struct debug_node root;
+static char previous_var[VAR_SEARCH_MAX + 1];
+static char previous_node_name[15];
 
 void __debug_counters(struct world *mzx_world)
 {
@@ -1590,7 +1810,9 @@ void __debug_counters(struct world *mzx_world)
   char **var_list = NULL, **tree_list = NULL;
 
   int window_focus = 0;
-  int node_selected = 0, var_selected = 0;
+  int var_selected = 0;
+  int node_selected = 0;
+  int node_scroll_offset = 0;
   int dialog_result;
   struct element *elements[8];
   struct dialog di;
@@ -1603,38 +1825,69 @@ void __debug_counters(struct world *mzx_world)
   int search_flags = VAR_SEARCH_NAMES + VAR_SEARCH_VALUES + VAR_SEARCH_WRAP;
   int search_pos = 0;
 
+  int reopened = 0;
+
+  // Prevent previous keys from carrying through.
+  force_release_all_keys();
+
+  set_context(CTX_COUNTER_DEBUG);
+
   m_show();
 
   // also known as crash_stack
   build_debug_tree(mzx_world, &root);
 
-  rebuild_tree_list(&root, &tree_list, &tree_size);
-
   focus = &(root.nodes[node_selected]);
+
+  // If the debugger was opened before, try to pick up where we left off.
+  if(previous_var[0] && previous_node_name[0])
+  {
+    struct debug_node *previous_node = find_node(&root, previous_node_name);
+
+    if(previous_node)
+    {
+      focus = previous_node;
+      strncpy(search_text, previous_var, VAR_SEARCH_MAX);
+      search_flags = VAR_SEARCH_NAMES | VAR_SEARCH_LOCAL | VAR_SEARCH_WRAP;
+
+      reopened = 1;
+    }
+  }
+
+  rebuild_tree_list(&root, &tree_list, &tree_size);
   rebuild_var_list(focus, &var_list, &num_vars, hide_empty_vars);
 
   do
   {
     last_node_selected = node_selected;
 
-    elements[0] = construct_list_box(
-     VAR_LIST_X, VAR_LIST_Y, (const char **)var_list, num_vars,
-     VAR_LIST_HEIGHT, VAR_LIST_WIDTH, 0, &var_selected, false);
-    elements[1] = construct_list_box(
-     TREE_LIST_X, TREE_LIST_Y, (const char **)tree_list, tree_size,
-     TREE_LIST_HEIGHT, TREE_LIST_WIDTH, 1, &node_selected, false);
-    elements[2] = construct_button(BUTTONS_X + 0, BUTTONS_Y + 0, "Search", 2);
-    elements[3] = construct_button(BUTTONS_X +11, BUTTONS_Y + 0, "New", 3);
-    elements[4] = construct_button(BUTTONS_X + 0, BUTTONS_Y + 2, "Toggle Empties", 4);
-    elements[5] = construct_button(BUTTONS_X + 0, BUTTONS_Y + 4, "Export", 5);
-    elements[6] = construct_button(BUTTONS_X +10, BUTTONS_Y + 4, "Done", -1);
-    elements[7] = construct_label(VAR_LIST_X, VAR_LIST_Y - 1, label);
+    if(!reopened)
+    {
+      elements[0] = construct_list_box(
+       VAR_LIST_X, VAR_LIST_Y, (const char **)var_list, num_vars,
+       VAR_LIST_HEIGHT, VAR_LIST_WIDTH, 0, &var_selected, NULL, false);
+      elements[1] = construct_list_box(
+       TREE_LIST_X, TREE_LIST_Y, (const char **)tree_list, tree_size,
+       TREE_LIST_HEIGHT, TREE_LIST_WIDTH, 1, &node_selected, &node_scroll_offset, false);
+      elements[2] = construct_button(BUTTONS_X + 0, BUTTONS_Y + 0, "Search", 2);
+      elements[3] = construct_button(BUTTONS_X +11, BUTTONS_Y + 0, "New", 3);
+      elements[4] = construct_button(BUTTONS_X + 0, BUTTONS_Y + 2, "Toggle Empties", 4);
+      elements[5] = construct_button(BUTTONS_X + 0, BUTTONS_Y + 4, "Export", 5);
+      elements[6] = construct_button(BUTTONS_X +10, BUTTONS_Y + 4, "Done", -1);
+      elements[7] = construct_label(VAR_LIST_X, VAR_LIST_Y - 1, label);
 
-    construct_dialog_ext(&di, "Debug Variables", 0, 0,
-     80, 25, elements, ARRAY_SIZE(elements), 0, 0, window_focus,
-     counter_debugger_idle_function);
+      construct_dialog_ext(&di, "Debug Variables", 0, 0,
+       80, 25, elements, ARRAY_SIZE(elements), 0, 0, window_focus,
+       counter_debugger_idle_function);
 
-    dialog_result = run_dialog(mzx_world, &di);
+      dialog_result = run_dialog(mzx_world, &di);
+    }
+
+    else
+    {
+      // Reopened? Force a search
+      dialog_result = -3;
+    }
 
     if(node_selected != last_node_selected)
       focus = find_node(&root, tree_list[node_selected] + TREE_LIST_WIDTH);
@@ -1671,6 +1924,8 @@ void __debug_counters(struct world *mzx_world)
       // Tree node
       case 1:
       {
+        window_focus = 1;
+
         // Collapse/Expand selected view if applicable
         if(focus->num_nodes)
         {
@@ -1689,6 +1944,8 @@ void __debug_counters(struct world *mzx_world)
           break;
         }
       }
+
+      /* fallthrough */
 
       // Repeat search (Ctrl+R)
       case -3:
@@ -1761,6 +2018,7 @@ void __debug_counters(struct world *mzx_world)
               if(!strcmp(tree_list[i] + TREE_LIST_WIDTH, search_node->name))
               {
                 node_selected = i;
+                node_scroll_offset = node_selected - (TREE_LIST_HEIGHT/2);
                 break;
               }
             }
@@ -1816,6 +2074,7 @@ void __debug_counters(struct world *mzx_world)
             if(!strcmp(tree_list[i] + TREE_LIST_WIDTH, focus->name))
             {
               node_selected = i;
+              node_scroll_offset = node_selected - (TREE_LIST_HEIGHT/2);
               break;
             }
           }
@@ -1865,7 +2124,7 @@ void __debug_counters(struct world *mzx_world)
         export_name[0] = 0;
 
         if(!new_file(mzx_world, txt_ext, ".txt", export_name,
-         "Export counters/strings", 1))
+         "Export counters/strings text file...", 1))
         {
           FILE *fp;
 
@@ -1877,8 +2136,6 @@ void __debug_counters(struct world *mzx_world)
              mzx_world->counter_list[i]->name,
              mzx_world->counter_list[i]->value);
           }
-
-          fprintf(fp, "set \"mzx_speed\" to %d\n", mzx_world->mzx_speed);
 
           for(i = 0; i < mzx_world->num_strings; i++)
           {
@@ -1902,11 +2159,33 @@ void __debug_counters(struct world *mzx_world)
       for(i = 0; i < focus->num_counters; i++)
         read_var(mzx_world, focus->counters[i]);
 
+    // If the debug menu was just reopened, reset searching
+    if(reopened)
+    {
+      search_text[0] = 0;
+      search_flags = VAR_SEARCH_NAMES + VAR_SEARCH_VALUES + VAR_SEARCH_WRAP;
+      reopened = 0;
+      // Also don't destruct the (uninitialized) dialog
+      continue;
+    }
+
     destruct_dialog(&di);
 
   } while(dialog_result != -1);
 
   m_hide();
+
+  pop_context();
+
+  // Make sure the robot debugger watchpoints have updated values
+  update_watchpoint_last_values(mzx_world);
+
+  // Copy the last selected var to the previous field.
+  if(var_selected < num_vars)
+  {
+    strncpy(previous_var, var_list[var_selected] + VAR_LIST_VAR, VAR_SEARCH_MAX);
+    strcpy(previous_node_name, focus->name);
+  }
 
   // Clear the big dumb tree first
   clear_debug_node(&root, true);
@@ -1917,17 +2196,25 @@ void __debug_counters(struct world *mzx_world)
   // We don't need to free anything this list points
   // to because clear_debug_tree already did it.
   free(var_list);
+
+  // Prevent UI keys from carrying through.
+  force_release_all_keys();
 }
 
-/********************/
-/* HAHAHA DEBUG BOX */
-/********************/
+/************************************************/
+/* Debug box, which shows actually useful stuff */
+/************************************************/
 
-void __draw_debug_box(struct world *mzx_world, int x, int y, int d_x, int d_y)
+void __draw_debug_box(struct world *mzx_world, int x, int y, int d_x, int d_y,
+ int show_keys)
 {
   struct board *src_board = mzx_world->current_board;
-  int i;
+  char version_string[16];
+  int version_string_len;
+  char key_string[4];
+  int key;
   int robot_mem = 0;
+  int i;
 
   draw_window_box(x, y, x + 19, y + 5, DI_DEBUG_BOX, DI_DEBUG_BOX_DARK,
    DI_DEBUG_BOX_CORNER, 0, 1);
@@ -1939,6 +2226,38 @@ void __draw_debug_box(struct world *mzx_world, int x, int y, int d_x, int d_y)
     "Robot mem:      kb\n",
     x + 1, y + 1, DI_DEBUG_LABEL, 0
   );
+
+  version_string_len = get_version_string(version_string, mzx_world->version);
+  write_string(version_string, x + 19 - version_string_len, y, DI_DEBUG_BOX, 0);
+
+  if(show_keys)
+  {
+    // key_code
+    key = get_last_key(keycode_pc_xt);
+    if(key && show_keys)
+    {
+      sprintf(key_string, "%d", key);
+      write_string(key_string, x + 15 - strlen(key_string), y + 5,
+       DI_DEBUG_BOX_DARK + 0x0A, 0);
+    }
+
+    // key_pressed
+
+    // In 2.82X through 2.84X, this erroneously applied
+    // numlock translations to the keycode.
+    if(mzx_world->version >= V282 && mzx_world->version <= V284)
+      key = get_last_key(keycode_internal_wrt_numlock);
+
+    else
+      key = get_last_key(keycode_internal);
+
+    if(key && show_keys)
+    {
+      sprintf(key_string, "%d", key);
+      write_string(key_string, x + 19 - strlen(key_string), y + 5,
+       DI_DEBUG_BOX_DARK + 0x0D, 0);
+    }
+  }
 
   write_number(d_x, DI_DEBUG_NUMBER, x + 8, y + 1, 5, 0, 10);
   write_number(d_y, DI_DEBUG_NUMBER, x + 14, y + 1, 5, 0, 10);

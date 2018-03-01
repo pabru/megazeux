@@ -20,24 +20,22 @@
  */
 
 #include "compat.h"
-
-#ifdef CONFIG_PSP
-#define _COMPILING_NEWLIB
-#endif
-
 #include "platform.h"
 #include "util.h"
 
 #include "SDL.h"
 
 #ifdef CONFIG_PSP
-#include <pspsdk.h>
 #include <psppower.h>
-PSP_MAIN_THREAD_STACK_SIZE_KB(512);
 #endif
 
 #ifdef CONFIG_GP2X
 #include <unistd.h> //for chdir, execl
+#endif
+
+#ifdef CONFIG_WII
+#include <sys/iosupport.h>
+#include <fat.h>
 #endif
 
 void delay(Uint32 ms)
@@ -56,6 +54,11 @@ bool platform_init(void)
 
 #ifdef CONFIG_PSP
   scePowerSetClockFrequency(333, 333, 166);
+#endif
+
+#ifdef CONFIG_WII
+  if(!fatInitDefault())
+    return false;
 #endif
 
 #ifdef DEBUG
@@ -92,15 +95,18 @@ void platform_quit(void)
 {
   SDL_Quit();
 
+#ifdef CONFIG_WII
+  {
+    int i;
+
+    for(i = 0; i < STD_MAX; i++)
+      if(devoptab_list[i] && devoptab_list[i]->chdir_r)
+        fatUnmount(devoptab_list[i]->name);
+  }
+#endif
+
 #ifdef CONFIG_GP2X
   chdir("/usr/gp2x");
   execl("/usr/gp2x/gp2xmenu", "/usr/gp2x/gp2xmenu", NULL);
 #endif
 }
-
-#ifdef CONFIG_PSP
-int _isatty(int fd)
-{
-  return isatty(fd);
-}
-#endif

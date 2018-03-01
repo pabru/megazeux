@@ -46,7 +46,9 @@
 #define ERR_BADCHARACTER   2
 #define ERR_INVALID        3
 
-#define CMD                (1 << 31)
+// 1 << 31 generates compiler warnings.
+
+#define CMD                (1 << 30)
 #define CMD_NOT            CMD | 0
 #define CMD_ANY            CMD | 1
 #define CMD_PLAYER         CMD | 2
@@ -116,7 +118,7 @@
 #define CMD_DUPLICATE      CMD | 67
 #define CMD_NO             CMD | 68
 
-#define IGNORE_TYPE             (1 << 30)
+#define IGNORE_TYPE             (1 << 29)
 #define IGNORE_TYPE_A           IGNORE_TYPE | 2
 #define IGNORE_TYPE_AN          IGNORE_TYPE | 3
 #define IGNORE_TYPE_AND         IGNORE_TYPE | 4
@@ -830,10 +832,13 @@ static const struct search_entry_short sorted_argument_list[] =
   { "=",                0,   S_EQUALITY  },
   { "=<",               4,   S_EQUALITY  },
   { "==",               0,   S_EQUALITY  },
+  { "===",              6,   S_EQUALITY  },
   { "=>",               3,   S_EQUALITY  },
   { ">",                2,   S_EQUALITY  },
   { "><",               5,   S_EQUALITY  },
   { ">=",               3,   S_EQUALITY  },
+  { "?=",               7,   S_EQUALITY  },
+  { "?==",              8,   S_EQUALITY  },
   { "a",                2,   S_EXTRA     },
   { "aligned",          5,   S_CONDITION },
   { "alignedew",        7,   S_CONDITION },
@@ -2056,6 +2061,57 @@ exit_out:
   return buffer;
 }
 
+char *assemble_file_mem(char *src, int len, int *size)
+{
+  char line_buffer[256];
+  char bytecode_buffer[256];
+  char error_buffer[256];
+  int line_bytecode_length;
+  int allocated_size = 1024;
+  char *buffer;
+
+  char *input_pos = src;
+  char *input_end = src + len;
+
+  int output_position = 1;
+  int current_size = 1;
+
+  buffer = cmalloc(1024);
+  buffer[0] = 0xFF;
+
+  // It's wasteful to copy each line, but the alternative is worse...
+  while(memsafegets(line_buffer, 255, &input_pos, input_end))
+  {
+    line_bytecode_length =
+     legacy_assemble_line(line_buffer, bytecode_buffer, error_buffer, NULL, NULL);
+
+    if((line_bytecode_length != -1) &&
+     ((current_size + line_bytecode_length) < MAX_OBJ_SIZE))
+    {
+      if((current_size + line_bytecode_length) > allocated_size)
+      {
+        allocated_size *= 2;
+        buffer = crealloc(buffer, allocated_size);
+      }
+      memcpy(buffer + output_position, bytecode_buffer, line_bytecode_length);
+      output_position += line_bytecode_length;
+      current_size += line_bytecode_length;
+    }
+    else
+    {
+      free(buffer);
+      return NULL;
+    }
+  }
+
+  // trim the buffer to match the output size
+  buffer = crealloc(buffer, current_size + 1);
+  buffer[current_size] = 0;
+  *size = current_size + 1;
+
+  return buffer;
+}
+
 __editor_maybe_static void print_color(int color, char *color_buffer)
 {
   if(color & 0x100)
@@ -2190,9 +2246,9 @@ __editor_maybe_static int disassemble_line(char *cpos, char **next,
  char *output_buffer, char *error_buffer, int *total_bytes,
  int print_ignores, char *arg_types, int *arg_count, int base)
 {
-  static const char *const equality_types[6] =
+  static const char *const equality_types[9] =
   {
-    "=", "<", ">", ">=", "<=", "!="
+    "=", "<", ">", ">=", "<=", "!=", "===", "?=", "?=="
   };
 
   static const char *const condition_types[18] =
@@ -2437,13 +2493,22 @@ __editor_maybe_static int disassemble_line(char *cpos, char **next,
           case EQUALITY:
           {
             int equality = *(input_position + 1);
+            input_position += 3;
 
             if(arg_types)
               arg_types[words] = S_EQUALITY;
 
-            input_position += 3;
-            strcpy(output_position, equality_types[equality]);
-            output_position += strlen(equality_types[equality]);
+            // Is this actually a valid operator?
+            if(equality < (int)ARRAY_SIZE(equality_types))
+            {
+              strcpy(output_position, equality_types[equality]);
+              output_position += strlen(equality_types[equality]);
+            }
+            else
+            {
+              strcpy(output_position, "??");
+              output_position += 2;
+            }
             break;
           }
 
@@ -2535,8 +2600,105 @@ void disassemble_file(char *name, char *program, int program_length,
   fclose(output_file);
 }
 
-#endif // CONFIG_DEBYTECODE
+#ifdef CONFIG_EDITOR
+static inline int get_program_line_count(char *program, int program_length)
+{
+  char *end = program + program_length;
+  int line_num = 0;
 
+  // Skip 0xFF
+  program++;
+
+  while(program < end)
+  {
+    program += *program + 2;
+    line_num++;
+  }
+
+  return line_num;
+}
+
+void disassemble_and_map_program(char *program, int program_length,
+ char **_source, int *_source_length, struct command_mapping **_command_map,
+ int *_command_map_length)
+{
+  // Take a program and turn in into source code plus a mapping from the
+  // bytecode to sourcecode. Required for the robot debugger.
+
+  char line_buffer[256] = { 0 };
+  int line_size = 0;
+
+  // Better to overshoot than undershoot here.
+  int source_length = program_length * 2;
+  char *source = cmalloc(source_length);
+  int offset = 0;
+
+  struct command_mapping *cmd_map;
+  int cmd_map_length;
+  int i;
+
+  char *start = program;
+  char *next = program + 1;
+
+  int ret;
+
+  cmd_map_length = get_program_line_count(program, program_length);
+  cmd_map = cmalloc(cmd_map_length * sizeof(struct command_mapping));
+
+  cmd_map[0].real_line = 0;
+  cmd_map[0].bc_pos = 0;
+  cmd_map[0].src_pos = 0;
+
+  for(i = 1; i < cmd_map_length; i++)
+  {
+    line_size = 0;
+
+    cmd_map[i].real_line = i;
+    cmd_map[i].bc_pos = next - start;
+    cmd_map[i].src_pos = offset;
+
+    ret = disassemble_line(next, &next,
+     line_buffer,
+     NULL,        // Error buffer
+     &line_size,
+     1,           // Print ignored words
+     NULL,        // Arg types
+     NULL,        // Arg count
+     10           // Numeric base
+    );
+
+    // +2 for line break and potentially the terminator
+    while(source_length - offset < line_size + 2)
+    {
+      source_length *= 2;
+      source = crealloc(source, source_length);
+    }
+
+    if(ret)
+    {
+      memcpy(source + offset, line_buffer, line_size);
+      offset += line_size;
+
+      source[offset] = '\n';
+      offset++;
+    }
+  }
+
+  source[offset] = '\0';
+
+  // Shrink program alloc
+  source_length = offset;
+  source = crealloc(source, source_length + 1);
+
+  *_source = source;
+  *_source_length = source_length;
+
+  *_command_map = cmd_map;
+  *_command_map_length = cmd_map_length;
+}
+#endif // CONFIG_EDITOR
+
+#endif // !CONFIG_DEBYTECODE
 
 
 int validate_legacy_bytecode(char *bc, int program_length)

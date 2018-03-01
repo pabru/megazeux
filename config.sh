@@ -25,6 +25,7 @@ usage() {
 	echo "  psp            Experimental PSP port"
 	echo "  gp2x           Experimental GP2X port"
 	echo "  nds            Experimental NDS port"
+	echo "  3ds            Experimental 3DS port"
 	echo "  wii            Experimental Wii port"
 	echo "  amiga          Experimental AmigaOS 4 port"
 	echo "  android        Experimental Android port"
@@ -48,8 +49,10 @@ usage() {
 	echo "  --disable-gl-prog     Disable GL renderers for programmable h/w."
 	echo "  --disable-overlay     Disable all overlay renderers."
 	echo "  --enable-gp2x         Enables half-res software renderer."
-	echo "  --disable-modplug     Disable ModPlug music engine."
+	echo "  --disable-xmp         Disable XMP music engine."
+	echo "  --enable-modplug      Enables ModPlug music engine."
 	echo "  --enable-mikmod       Enables MikMod music engine."
+	echo "  --enable-openmpt      Enables OpenMPT music engine."
 	echo "  --disable-libpng      Disable PNG screendump support."
 	echo "  --disable-audio       Disable all audio (sound + music)."
 	echo "  --enable-tremor       Switches out libvorbis for libtremor."
@@ -64,7 +67,8 @@ usage() {
 	echo "  --disable-check-alloc Disables memory allocator error handling."
 	echo "  --disable-uthash      Disables hash counter/string lookups."
 	echo "  --enable-debytecode   Enable experimental 'debytecode' transform."
-	echo "  --enable-libsdl2      Enable experimental SDL 2.0 support."
+	echo "  --disable-libsdl2     Disable SDL 2.0 support (falls back on 1.2)."
+	echo "  --enable-fps          Enable frames-per-second counter."
 	echo
 	echo "e.g.: ./config.sh --platform unix --prefix /usr"
 	echo "                  --sysconfdir /etc --disable-x11"
@@ -98,8 +102,10 @@ GL_FIXED="true"
 GL_PROGRAM="true"
 OVERLAY="true"
 GP2X="false"
-MODPLUG="true"
+XMP="true"
+MODPLUG="false"
 MIKMOD="false"
+OPENMPT="false"
 LIBPNG="true"
 AUDIO="true"
 TREMOR="false"
@@ -115,7 +121,8 @@ EGL="false"
 CHECK_ALLOC="true"
 UTHASH="true"
 DEBYTECODE="false"
-LIBSDL2="false"
+LIBSDL2="true"
+FPSCOUNTER="false"
 
 #
 # User may override above settings
@@ -208,6 +215,12 @@ while [ "$1" != "" ]; do
 	[ "$1" = "--disable-mikmod" ] && MIKMOD="false"
 	[ "$1" = "--enable-mikmod" ]  && MIKMOD="true"
 
+	[ "$1" = "--disable-xmp" ] && XMP="false"
+	[ "$1" = "--enable-xmp" ]  && XMP="true"
+
+	[ "$1" = "--disable-openmpt" ] && OPENMPT="false"
+	[ "$1" = "--enable-openmpt" ]  && OPENMPT="true"
+
 	[ "$1" = "--disable-libpng" ] && LIBPNG="false"
 	[ "$1" = "--enable-libpng" ]  && LIBPNG="true"
 
@@ -255,6 +268,9 @@ while [ "$1" != "" ]; do
 
 	[ "$1" = "--enable-libsdl2" ]  && LIBSDL2="true"
 	[ "$1" = "--disable-libsdl2" ] && LIBSDL2="false"
+
+	[ "$1" = "--enable-fps" ]  && FPSCOUNTER="true"
+	[ "$1" = "--disable-fps" ] && FPSCOUNTER="false"
 
 	if [ "$1" = "--help" ]; then
 		usage
@@ -309,19 +325,19 @@ elif [ "$PLATFORM" = "unix" -o "$PLATFORM" = "unix-devel" ]; then
 		LIBDIR=lib64
 		# FIXME: FreeBSD amd64 hack
 		[ "$UNIX" = "freebsd" ] && LIBDIR=lib
-		if [ "$MODULAR" = "true" ]; then
-			echo "ARCH_CFLAGS+=-fPIC" >> platform.inc
-			echo "ARCH_CXXFLAGS+=-fPIC" >> platform.inc
-		fi
 	elif [ "`echo $MACH | sed 's,i.86,x86,'`" = "x86" ]; then
 		ARCHNAME=x86
 		LIBDIR=lib
 	elif [ "`echo $MACH | sed 's,^arm.*,arm,'`" = "arm" ]; then
 		ARCHNAME=arm
 		LIBDIR=lib
+	elif [ "$MACH" == "ppc" ]; then
+		ARCHNAME=ppc
+		LIBDIR=lib
 	else
-		echo "Add a friendly MACH to config.sh."
-		exit 1
+		ARCHNAME=$MACH
+		LIBDIR=lib # The default for most systems
+		echo "WARNING: Compiling on an unsupported architecture. Add a friendly MACH to config.sh."
 	fi
 
 	echo "#define PLATFORM \"$UNIX-$ARCHNAME\"" > src/config.h
@@ -393,13 +409,20 @@ echo "#define CONFDIR \"$SYSCONFDIR/\"" >> src/config.h
 # FIXME: SHAREDIR should be hardcoded in fewer cases
 #
 if [ "$PLATFORM" = "unix" ]; then
-	echo "#define CONFFILE \"megazeux-config\""    >> src/config.h
-	echo "#define SHAREDIR \"$SHAREDIR/megazeux/\"" >> src/config.h
+	echo "#define CONFFILE \"megazeux-config\""        >> src/config.h
+	echo "#define SHAREDIR \"$SHAREDIR/megazeux/\""    >> src/config.h
+	echo "#define USERCONFFILE \".megazeux-config\"" >> src/config.h
 elif [ "$PLATFORM" = "nds" ]; then
 	SHAREDIR=/games/megazeux
 	GAMESDIR=$SHAREDIR
 	BINDIR=$SHAREDIR
 	echo "#define CONFFILE \"config.txt\"" >> src/config.h
+	echo "#define SHAREDIR \"$SHAREDIR\""  >> src/config.h
+elif [ "$PLATFORM" = "3ds" ]; then
+	SHAREDIR=/3ds/megazeux
+	GAMESDIR=$SHAREDIR
+	BINDIR=$SHAREDIR
+	echo "#define CONFFILE \"$SHAREDIR/config.txt\"" >> src/config.h
 	echo "#define SHAREDIR \"$SHAREDIR\""  >> src/config.h
 elif [ "$PLATFORM" = "wii" ]; then
 	SHAREDIR=/apps/megazeux
@@ -411,8 +434,9 @@ elif [ "$PLATFORM" = "darwin" ]; then
 	SHAREDIR=../Resources
 	GAMESDIR=$SHAREDIR
 	BINDIR=$SHAREDIR
-	echo "#define CONFFILE \"config.txt\"" >> src/config.h
-	echo "#define SHAREDIR \"$SHAREDIR\""  >> src/config.h
+	echo "#define CONFFILE \"config.txt\""             >> src/config.h
+	echo "#define SHAREDIR \"$SHAREDIR\""              >> src/config.h
+	echo "#define USERCONFFILE \".megazeux-config\"" >> src/config.h
 elif [ "$PLATFORM" = "android" ]; then
 	SHAREDIR=/data/megazeux
 	GAMESDIR=/data/megazeux
@@ -441,10 +465,11 @@ echo "SHAREDIR=$SHAREDIR"     >> platform.inc
 if [ "$PLATFORM" = "wii" ]; then
 	echo "#define CONFIG_WII" >> src/config.h
 	echo "BUILD_WII=1" >> platform.inc
+	LIBSDL2="false"
 fi
 
-if [ "$PLATFORM" = "wii" ]; then
-	echo "Disabling SDL (Wii)."
+if [ "$PLATFORM" = "3ds" ]; then
+	echo "Disabling SDL (3DS)."
 	SDL="false"
 fi
 
@@ -514,8 +539,25 @@ if [ "$PLATFORM" = "nds" ]; then
 	echo "Building custom NDS renderer."
 	SOFTWARE="false"
 
-    echo "Force-disabling hash tables on NDS."
-    UTHASH="false"
+	echo "Force-disabling hash tables on NDS."
+	UTHASH="false"
+fi
+
+#
+# If the 3DS arch is enabled, some code has to be compile time
+# enabled too.
+#
+if [ "$PLATFORM" = "3ds" ]; then
+	echo "Enabling 3DS-specific hacks."
+	echo "#define CONFIG_3DS" >> src/config.h
+	echo "BUILD_3DS=1" >> platform.inc
+
+	echo "Force-disabling software renderer on 3DS."
+	echo "Building custom 3DS renderer."
+	SOFTWARE="false"
+
+	echo "Disabling utils on 3DS (silly)."
+	UTILS="false"
 fi
 
 #
@@ -551,9 +593,10 @@ if [ "$PLATFORM" = "gp2x" ]; then
 fi
 
 #
-# Force-disable OpenGL and overlay renderers on PSP, GP2X and NDS
+# Force-disable OpenGL and overlay renderers on PSP, GP2X, 3DS, NDS and Wii
 #
 if [ "$PLATFORM" = "psp" -o "$PLATFORM" = "gp2x" \
+  -o "$PLATFORM" = "3ds" \
   -o "$PLATFORM" = "nds" -o "$PLATFORM" = "wii" ]; then
   	echo "Force-disabling OpenGL and overlay renderers."
 	GL="false"
@@ -575,20 +618,22 @@ if [ "$GL" = "false" ]; then
 fi
 
 #
-# Force-enable tremor on PSP/GP2X
+# Force-enable tremor on PSP/GP2X/3DS
 #
 if [ "$PLATFORM" = "psp" -o "$PLATFORM" = "gp2x" \
-  -o "$PLATFORM" = "android" ]; then
+  -o "$PLATFORM" = "android" -o "$PLATFORM" = "3ds" ]; then
 	echo "Force-switching ogg/vorbis to tremor."
 	TREMOR="true"
 fi
 
 #
-# Force-disable modplug/mikmod if audio is disabled
+# Force-disable modplug/mikmod/openmpt if audio is disabled
 #
 if [ "$AUDIO" = "false" ]; then
 	MODPLUG="false"
 	MIKMOD="false"
+	XMP="false"
+	OPENMPT="false"
 fi
 
 #
@@ -604,6 +649,7 @@ fi
 # Force disable modular DSOs.
 #
 if [ "$PLATFORM" = "gp2x" -o "$PLATFORM" = "nds" \
+  -o "$PLATFORM" = "3ds" \
   -o "$PLATFORM" = "psp"  -o "$PLATFORM" = "wii" ]; then
 	echo "Force-disabling modular build (nonsensical or unsupported)."
 	MODULAR="false"
@@ -613,6 +659,7 @@ fi
 # Force disable networking.
 #
 if [ "$EDITOR" = "false" -o "$PLATFORM" = "unix" -o "$PLATFORM" = "psp" \
+  -o "$PLATFORM" = "3ds" \
   -o "$PLATFORM" = "nds" -o "$PLATFORM" = "wii" ]; then
 	echo "Force-disabling networking (nonsensical or unsupported)."
 	NETWORK="false"
@@ -701,11 +748,11 @@ fi
 # User may want to compile utils (checkres, downver, txt2hlp)
 #
 if [ "$UTILS" = "true" ]; then
-	echo "Building utils (checkres, downver, hlp2txt, txt2hlp)."
+	echo "Building utils (checkres, downver, png2smzx, hlp2txt, txt2hlp)."
 	echo "BUILD_UTILS=1" >> platform.inc
 	echo "#define CONFIG_UTILS" >> src/config.h
 else
-	echo "Disabled utils (checkres, downver, hlp2txt, txt2hlp)."
+	echo "Disabled utils (checkres, downver, png2smzx, hlp2txt, txt2hlp)."
 fi
 
 #
@@ -813,7 +860,7 @@ fi
 #
 # GX renderer (Wii and GameCube)
 #
-if [ "$PLATFORM" = "wii" ]; then
+if [ "$PLATFORM" = "wii" -a "$SDL" = "false" ]; then
 	echo "Building custom GX renderer."
 	echo "#define CONFIG_RENDER_GX" >> src/config.h
 	echo "BUILD_RENDER_GX=1" >> platform.inc
@@ -832,15 +879,29 @@ fi
 
 #
 # GP2X needs Mikmod, other platforms can pick
+# Keep the default at the bottom so it doesn't override others.
 #
+
 if [ "$MODPLUG" = "true" ]; then
 	echo "Selected Modplug music engine."
+	echo "#define CONFIG_AUDIO_MOD_SYSTEM" >> src/config.h
 	echo "#define CONFIG_MODPLUG" >> src/config.h
 	echo "BUILD_MODPLUG=1" >> platform.inc
 elif [ "$MIKMOD" = "true" ]; then
 	echo "Selected Mikmod music engine."
+	echo "#define CONFIG_AUDIO_MOD_SYSTEM" >> src/config.h
 	echo "#define CONFIG_MIKMOD" >> src/config.h
 	echo "BUILD_MIKMOD=1" >> platform.inc
+elif [ "$OPENMPT" = "true" ]; then
+	echo "Selected OpenMPT music engine."
+	echo "#define CONFIG_AUDIO_MOD_SYSTEM" >> src/config.h
+	echo "#define CONFIG_OPENMPT" >> src/config.h
+	echo "BUILD_OPENMPT=1" >> platform.inc
+elif [ "$XMP" = "true" ]; then
+	echo "Selected XMP music engine."
+	echo "#define CONFIG_AUDIO_MOD_SYSTEM" >> src/config.h
+	echo "#define CONFIG_XMP" >> src/config.h
+	echo "BUILD_XMP=1" >> platform.inc
 else
 	echo "Music engine disabled."
 fi
@@ -974,6 +1035,7 @@ fi
 if [ "$UTHASH" = "true" ]; then
 	echo "uthash counter/string lookup enabled."
 	echo "#define CONFIG_UTHASH" >> src/config.h
+	echo "BUILD_UTHASH=1" >> platform.inc
 else
 	echo "uthash counter/string lookup disabled (using binary search)."
 fi
@@ -990,13 +1052,23 @@ else
 fi
 
 #
-# Experimental SDL 2.0 support, if enabled
+# SDL 2.0 support, if enabled
 #
 if [ "$LIBSDL2" = "true" ]; then
-	echo "Experimental SDL 2.0 support enabled."
+	echo "SDL 2.0 support enabled."
 	echo "BUILD_LIBSDL2=1" >> platform.inc
 else
-	echo "Experimental SDL 2.0 support disabled."
+	echo "SDL 2.0 support disabled."
+fi
+
+#
+# Frames-per-second counter
+#
+if [ "$FPSCOUNTER" = "true" ]; then
+	echo "fps counter enabled."
+	echo "#define CONFIG_FPS" >> src/config.h
+else
+	echo "fps counter disabled."
 fi
 
 echo

@@ -118,13 +118,13 @@ void scroll_edit(struct world *mzx_world, struct scroll *scroll, int type)
 
   // Draw screen
   save_screen();
-
+  disable_gui_mode0();
   dialog_fadein();
 
   if(editing)
-    scroll_edging_ext(mzx_world, type, 256, 16);
+    scroll_edging_ext(mzx_world, type, PRO_CH, 16);
   else
-    scroll_edging_ext(mzx_world, type, 0, 16);
+    scroll_edging_ext(mzx_world, type, 0, 0);
 
   // Loop
   where = scroll->mesg;
@@ -180,8 +180,12 @@ void scroll_edit(struct world *mzx_world, struct scroll *scroll, int type)
     else
     {
       update_event_status_delay();
-      key = get_key(keycode_internal);
+      key = get_key(keycode_internal_wrt_numlock);
     }
+
+    // Exit event -- mimic Escape
+    if(get_exit_status())
+      key = IKEY_ESCAPE;
 
     old_pos = pos;
 
@@ -379,7 +383,7 @@ void scroll_edit(struct world *mzx_world, struct scroll *scroll, int type)
   } while(key != IKEY_ESCAPE);
   // Restore screen and exit
   restore_screen();
-
+  enable_gui_mode0();
   dialog_fadeout();
 }
 
@@ -558,7 +562,7 @@ void help_display(struct world *mzx_world, char *help, int offs, char *file,
 
   dialog_fadein();
 
-  scroll_edging_ext(mzx_world, 3, 256, 16);
+  scroll_edging_ext(mzx_world, 3, PRO_CH, 16);
 
   // Loop
   file[0] = label[0] = 0;
@@ -596,7 +600,12 @@ void help_display(struct world *mzx_world, char *help, int offs, char *file,
       key = IKEY_ESCAPE;
     }
 
-    key = get_key(keycode_internal);
+    key = get_key(keycode_internal_wrt_numlock);
+
+    // Exit event -- mimic Escape
+    if(get_exit_status())
+      key = IKEY_ESCAPE;
+
     old_pos = pos;
     switch(key)
     {

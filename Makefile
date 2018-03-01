@@ -14,7 +14,7 @@ ifeq ($(filter -r,$(MAKEFLAGS)),)
 MAKEFLAGS += -r
 endif
 
-.PHONY: clean help_check mzx mzx.debug build build_clean source
+.PHONY: all clean help_check test test_clean mzx mzx.debug build build_clean source
 
 -include platform.inc
 include version.inc
@@ -57,6 +57,13 @@ endif
 MIKMOD_CFLAGS  ?= -I${PREFIX}/include
 MIKMOD_LDFLAGS ?= -L${PREFIX}/lib -lmikmod
 
+# Uncomment these when we don't need to contrib xmp.
+#XMP_CFLAGS  ?= -I${PREFIX}/include
+#XMP_LDFLAGS ?= -L${PREFIX}/lib -lxmp
+
+OPENMPT_CFLAGS  ?= -I${PREFIX}/include
+OPENMPT_LDFLAGS ?= -L${PREFIX}/lib -lopenmpt
+
 ZLIB_CFLAGS  ?= -I${PREFIX}/include \
                 -D_FILE_OFFSET_BITS=32 -U_LARGEFILE64_SOURCE
 ZLIB_LDFLAGS ?= -L${PREFIX}/lib -lz
@@ -68,7 +75,7 @@ endif
 
 PTHREAD_LDFLAGS ?= -lpthread
 
-OPTIMIZE_CFLAGS ?= -O2
+OPTIMIZE_CFLAGS ?= -O3
 
 ifeq (${DEBUG},1)
 #
@@ -102,7 +109,14 @@ CXXFLAGS += -g -W -Wall -Wno-unused-parameter -std=gnu++98
 CXXFLAGS += -fno-exceptions -fno-rtti ${ARCH_CXXFLAGS}
 LDFLAGS  += ${ARCH_LDFLAGS}
 
-ifeq (${shell ${CC} -dumpversion | cut -d. -f1},4)
+#
+# GCC version >= 4.x
+#
+
+GCC_VER_MAJOR := ${shell ${CC} -dumpversion | cut -d. -f1}
+GCC_VER_MAJOR_GE_4 := ${shell test $(GCC_VER_MAJOR) -ge 4; echo $$?}
+
+ifeq ($(GCC_VER_MAJOR_GE_4),0)
 
 ifeq (${DEBUG},1)
 CFLAGS   += -fbounds-check
@@ -116,12 +130,9 @@ endif
 # Variadic macros are arguably less portable, but all the compilers we
 # support have them.
 #
-# The "long long" type is only used in one platform's header files, and we
-# don't use it at all in MegaZeux (even if we did it's quite portable).
-#
 ifneq (${PLATFORM},android)
-CFLAGS   += -pedantic -Wno-variadic-macros -Wno-long-long
-CXXFLAGS += -pedantic -fpermissive -Wno-variadic-macros -Wno-long-long
+CFLAGS   += -pedantic -Wno-variadic-macros
+CXXFLAGS += -pedantic -fpermissive -Wno-variadic-macros
 endif
 
 ifneq (${PLATFORM},mingw)
@@ -136,24 +147,25 @@ CXXFLAGS += -fvisibility=hidden
 #
 # Skip the stack protector on embedded platforms; it just unnecessarily
 # slows things down, and there's no easy way to write a convincing
-# __stack_chk_fail function.
+# __stack_chk_fail function. MinGW may or may not have a __stack_chk_fail
+# function. Skip android, too.
 #
-ifeq ($(or ${BUILD_GP2X},${BUILD_NDS},${BUILD_PSP},${BUILD_WII}),)
+ifeq ($(or ${BUILD_GP2X},${BUILD_NDS},${BUILD_3DS},${BUILD_PSP},${BUILD_WII}),)
 ifneq (${PLATFORM},android)
 CFLAGS   += -fstack-protector-all
 CXXFLAGS += -fstack-protector-all
 endif
 endif
 
+endif
+endif
+
 #
-# Enabling this across the board for modular builds.
+# Enable position-independent code across the board for modular builds.
 #
 ifeq (${BUILD_MODULAR},1)
 CFLAGS += -fPIC
 CXXFLAGS += -fPIC
-endif
-
-endif
 endif
 
 #
@@ -228,7 +240,7 @@ endif
 
 include src/Makefile.in
 
-clean: mzx_clean
+clean: mzx_clean test_clean
 
 ifeq (${BUILD_UTILS},1)
 include src/utils/Makefile.in
@@ -246,12 +258,11 @@ build: ${build}
 ${build}:
 	${MKDIR} -p ${build}/docs
 	${MKDIR} -p ${build}/assets
-	${CP} config.txt ${build}
+	${CP} config.txt LICENSE ${build}
 	${CP} assets/default.chr assets/edit.chr ${build}/assets
 	${CP} assets/smzx.pal ${build}/assets
-	${CP} docs/COPYING.DOC docs/changelog.txt docs/port.txt ${build}/docs
 	${CP} docs/macro.txt docs/keycodes.html ${build}/docs
-	${CP} docs/platform_matrix.html ${build}/docs
+	${CP} docs/changelog.txt docs/platform_matrix.html ${build}/docs
 	${CP} ${mzxrun} ${build}
 	@if test -f ${mzxrun}.debug; then \
 		cp ${mzxrun}.debug ${build}; \
@@ -281,6 +292,7 @@ ifeq (${BUILD_UTILS},1)
 	${CP} ${checkres} ${downver} ${build}/utils
 	${CP} ${hlp2txt} ${txt2hlp} ${build}/utils
 	${CP} ${png2smzx} ${build}/utils
+	${CP} ${ccv} ${build}/utils
 	@if test -f ${checkres}.debug; then \
 		cp ${checkres}.debug ${downver}.debug ${build}/utils; \
 		cp ${hlp2txt}.debug  ${txt2hlp}.debug ${build}/utils; \
@@ -288,11 +300,11 @@ ifeq (${BUILD_UTILS},1)
 	fi
 endif
 ifeq (${BUILD_RENDER_GL_PROGRAM},1)
-	${MKDIR} -p ${build}/assets/shaders/extra
+	${MKDIR} -p ${build}/assets/shaders/scalers
 	${CP} assets/shaders/*.vert ${build}/assets/shaders
 	${CP} assets/shaders/*.frag ${build}/assets/shaders
-	${CP} assets/shaders/extra/*.frag assets/shaders/extra/README.txt \
-	 	${build}/assets/shaders/extra
+	${CP} assets/shaders/scalers/*.frag assets/shaders/scalers/*.vert \
+		assets/shaders/scalers/README.txt ${build}/assets/shaders/scalers
 endif
 
 distclean: clean
@@ -305,7 +317,14 @@ assets/help.fil: ${txt2hlp} docs/WIPHelp.txt
 
 help_check: ${hlp2txt} assets/help.fil
 	@src/utils/hlp2txt assets/help.fil help.txt
-	@diff -q docs/WIPHelp.txt help.txt
+	@echo @ >> help.txt
+	@diff --strip-trailing-cr -q docs/WIPHelp.txt help.txt
 	@rm -f help.txt
+
+test: mzx
+	@testworlds/run.sh @{PLATFORM} @{LIBDIR}
+
+test_clean:
+	@rm -rf testworlds/log
 
 endif

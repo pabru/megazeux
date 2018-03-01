@@ -34,7 +34,7 @@
 #define __M_BEGIN_DECLS
 #define __M_END_DECLS
 
-#if !defined(CONFIG_WII) && !defined(CONFIG_NDS)
+#if !defined(CONFIG_WII) && !defined(CONFIG_NDS) && !defined(CONFIG_3DS)
 
 #undef false
 #undef true
@@ -49,6 +49,10 @@ typedef enum
 #endif // !CONFIG_WII && !CONFIG_NDS
 
 #endif /* __cplusplus */
+
+#ifdef CONFIG_3DS
+#include <3ds.h>
+#endif
 
 #ifdef CONFIG_NDS
 #include <nds.h>
@@ -79,11 +83,12 @@ typedef enum
 #endif
 
 #ifdef CONFIG_AUDIO
-#if defined(CONFIG_MODPLUG) || defined(CONFIG_MIKMOD)
+// One of the mod playback engines is enabled.
+#if defined(CONFIG_AUDIO_MOD_SYSTEM)
 #define __audio_c_maybe_static
-#else // !CONFIG_MODPLUG && !CONFIG_MIKMOD
+#else // !CONFIG_AUDIO_MOD_SYSTEM
 #define __audio_c_maybe_static static
-#endif // CONFIG_MODPLUG || CONFIG_MIKMOD
+#endif // CONFIG_AUDIO_MOD_SYSTEM
 #else // !CONFIG_AUDIO
 #define __audio_c_maybe_static static
 #endif // CONFIG_AUDIO

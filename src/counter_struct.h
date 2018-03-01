@@ -26,7 +26,7 @@
 __M_BEGIN_DECLS
 
 #ifdef CONFIG_UTHASH
-#include "uthash_caseinsensitive.h"
+#include <utcasehash.h>
 #endif
 
 struct world;
@@ -111,15 +111,18 @@ enum special_counter_return
   FOPEN_FAPPEND,
   FOPEN_FMODIFY,
   FOPEN_SMZX_PALETTE,
+  FOPEN_SMZX_INDICES,
   FOPEN_LOAD_GAME,
   FOPEN_SAVE_GAME,
-  FOPEN_SAVE_WORLD,
+  FOPEN_LOAD_COUNTERS,
+  FOPEN_SAVE_COUNTERS,
   FOPEN_LOAD_ROBOT,
   FOPEN_LOAD_BC,
-#ifndef CONFIG_DEBYTECODE
+#ifdef CONFIG_DEBYTECODE
+  FOPEN_LOAD_SOURCE_FILE,
+#endif
   FOPEN_SAVE_ROBOT,
   FOPEN_SAVE_BC
-#endif
 };
 
 __M_END_DECLS

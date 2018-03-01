@@ -20,13 +20,19 @@
 #include "board.h"
 
 #include "../board.h"
+#include "../error.h"
 #include "../extmem.h"
+#include "../legacy_board.h"
 #include "../world.h"
+#include "../world_prop.h"
+#include "../util.h"
+#include "../zip.h"
 
 #include "world.h"
 #include "configure.h"
 
 #include <string.h>
+
 
 static int board_magic(const char magic_string[4])
 {
@@ -36,7 +42,7 @@ static int board_magic(const char magic_string[4])
     {
       // MZX versions >= 2.00 && <= 2.51S1
       if(magic_string[2] == 'B' && magic_string[3] == '2')
-        return 0x0200;
+        return V251;
 
       // MZX versions >= 2.51S2 && <= 9.xx
       if((magic_string[2] > 1) && (magic_string[2] < 10))
@@ -48,7 +54,27 @@ static int board_magic(const char magic_string[4])
   return 0;
 }
 
-static struct board *load_board_allocate_direct(FILE *fp, int version)
+void save_board_file(struct world *mzx_world, struct board *cur_board,
+ char *name)
+{
+  struct zip_archive *zp = zip_open_file_write(name);
+
+  if(zp)
+  {
+    zputc(0xFF, zp);
+
+    zputc('M', zp);
+    zputc((MZX_VERSION >> 8) & 0xFF, zp);
+    zputc(MZX_VERSION & 0xFF, zp);
+
+    save_board(mzx_world, cur_board, zp, 0, MZX_VERSION, 0);
+
+    zip_close(zp, NULL);
+  }
+}
+
+static struct board *legacy_load_board_allocate_direct(struct world *mzx_world,
+ FILE *fp, int version)
 {
   struct board *cur_board = cmalloc(sizeof(struct board));
   int board_start, board_end;
@@ -59,37 +85,113 @@ static struct board *load_board_allocate_direct(FILE *fp, int version)
   fseek(fp, board_start, SEEK_SET);
 
   cur_board->world_version = version;
-  load_board_direct(cur_board, fp, (board_end - board_start), 0, version);
+  legacy_load_board_direct(mzx_world, cur_board, fp, (board_end - board_start), 0,
+   version);
   fread(cur_board->board_name, 25, 1, fp);
   return cur_board;
 }
 
-void replace_current_board(struct world *mzx_world, char *name)
+static int find_first_board(struct zip_archive *zp)
 {
-  int version, current_board_id = mzx_world->current_board_id;
-  struct board *src_board = mzx_world->current_board;
-  FILE *input_mzb = fopen_unsafe(name, "rb");
-  char version_string[4];
+  unsigned int file_id;
 
-  fread(version_string, 4, 1, input_mzb);
-  version = board_magic(version_string);
+  assign_fprops(zp, 1);
 
-  if(version > 0 && version <= WORLD_VERSION)
+  // The first file after sorting should be the board info for ID 0.
+  // If it isn't, this isn't a board file.
+
+  if(ZIP_SUCCESS == zip_get_next_prop(zp, &file_id, NULL, NULL))
   {
-    clear_board(src_board);
-    src_board = load_board_allocate_direct(input_mzb, version);
-    optimize_null_objects(src_board);
-
-    set_update_done_current(mzx_world);
-
-    if(src_board->robot_list)
-      src_board->robot_list[0] = &mzx_world->global_robot;
-
-    set_current_board(mzx_world, src_board);
-    mzx_world->board_list[current_board_id] = src_board;
+    if(file_id == FPROP_BOARD_INFO)
+    {
+      // Loading board ID 0:
+      return 0;
+    }
   }
 
-  fclose(input_mzb);
+  return -1;
+}
+
+void replace_current_board(struct world *mzx_world, char *name)
+{
+  int current_board_id = mzx_world->current_board_id;
+  struct board *src_board = mzx_world->current_board;
+
+  FILE *fp = fopen_unsafe(name, "rb");
+  struct zip_archive *zp;
+
+  char version_string[4];
+  int file_version;
+  int success = 0;
+
+  if(fp)
+  {
+    fread(version_string, 4, 1, fp);
+    file_version = board_magic(version_string);
+
+    if(file_version > 0 && file_version <= MZX_LEGACY_FORMAT_VERSION)
+    {
+      // Legacy board.
+      clear_board(src_board);
+
+      src_board =
+       legacy_load_board_allocate_direct(mzx_world, fp, file_version);
+
+      success = 1;
+      fclose(fp);
+    }
+    else
+
+    if(file_version <= MZX_VERSION)
+    {
+      int board_id;
+
+      // Regular board or maybe not a board at all.
+      zp = zip_open_fp_read(fp);
+
+      // Make sure it's an actual zip.
+      if(ZIP_SUCCESS == zip_read_directory(zp))
+      {
+        // Make sure the zip contains a board.
+        board_id = find_first_board(zp);
+
+        if(board_id >= 0)
+        {
+          clear_board(src_board);
+
+          src_board =
+           load_board_allocate(mzx_world, zp, 0, file_version, board_id);
+
+          success = 1;
+        }
+      }
+
+      if(!success)
+        error_message(E_BOARD_FILE_INVALID, 0, NULL);
+
+      zip_close(zp, NULL);
+    }
+
+    else
+    {
+      error_message(E_BOARD_FILE_FUTURE_VERSION, file_version, NULL);
+      fclose(fp);
+    }
+
+    if(success)
+    {
+      // Set up the newly allocated board.
+      optimize_null_objects(src_board);
+
+      if(src_board->robot_list)
+        src_board->robot_list[0] = &mzx_world->global_robot;
+
+      set_update_done_current(mzx_world);
+
+      set_current_board(mzx_world, src_board);
+      mzx_world->board_list[current_board_id] = src_board;
+    }
+  }
 }
 
 struct board *create_blank_board(struct editor_config_info *conf)
@@ -137,6 +239,7 @@ struct board *create_blank_board(struct editor_config_info *conf)
     cur_board->board_dir[i] = NO_BOARD;
   }
 
+  cur_board->reset_on_entry =    conf->reset_on_entry;
   cur_board->restart_if_zapped = conf->restart_if_hurt;
   cur_board->time_limit =        conf->time_limit;
   cur_board->last_key = '?';
@@ -159,6 +262,9 @@ struct board *create_blank_board(struct editor_config_info *conf)
   cur_board->volume = 255;
   cur_board->volume_inc = 0;
   cur_board->volume_target = 255;
+
+  strcpy(cur_board->charset_path, conf->charset_path);
+  strcpy(cur_board->palette_path, conf->palette_path);
 
   cur_board->num_robots = 0;
   cur_board->num_robots_active = 0;
@@ -189,24 +295,27 @@ struct board *create_blank_board(struct editor_config_info *conf)
   return cur_board;
 }
 
-void save_board_file(struct board *cur_board, char *name)
+struct board *create_buffer_board(int width, int height)
 {
-  FILE *board_file = fopen_unsafe(name, "wb");
+  // Create a dummy board to be used as a buffer for undo block actions
+  struct board *src_board = ccalloc(1, sizeof(struct board));
+  int layer_size = width * height;
 
-  if(board_file)
-  {
-    fputc(0xff, board_file);
+  src_board->board_width = width;
+  src_board->board_height = height;
 
-    fputc('M', board_file);
-    fputc((WORLD_VERSION >> 8) & 0xff, board_file);
-    fputc(WORLD_VERSION & 0xff, board_file);
+  src_board->robot_list = ccalloc(1, sizeof(struct robot *));
+  src_board->scroll_list = ccalloc(1, sizeof(struct scroll *));
+  src_board->sensor_list = ccalloc(1, sizeof(struct sensor *));
 
-    optimize_null_objects(cur_board);
-    save_board(cur_board, board_file, 0, WORLD_VERSION);
-    // Write name
-    fwrite(cur_board->board_name, 25, 1, board_file);
-    fclose(board_file);
-  }
+  src_board->level_id = ccalloc(1, layer_size);
+  src_board->level_color = ccalloc(1, layer_size);
+  src_board->level_param = ccalloc(1, layer_size);
+  src_board->level_under_id = ccalloc(1, layer_size);
+  src_board->level_under_color = ccalloc(1, layer_size);
+  src_board->level_under_param = ccalloc(1, layer_size);
+
+  return src_board;
 }
 
 void change_board_size(struct board *src_board, int new_width, int new_height)

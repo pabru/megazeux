@@ -107,6 +107,10 @@ enum token_type
   TOKEN_TYPE_EQUALITY,
   TOKEN_TYPE_BASIC_IDENTIFIER,
   TOKEN_TYPE_COMMENT,
+  TOKEN_TYPE_BASIC_COLOR,
+  TOKEN_TYPE_BASIC_PARAM,
+  TOKEN_TYPE_WILDCARD_COLOR,
+  TOKEN_TYPE_WILDCARD_PARAM,
   TOKEN_TYPE_INVALID              = 0x4000000,
   TOKEN_TYPE_CONTAINS_EXPRESSIONS = 0x8000000,
 };
@@ -259,11 +263,19 @@ char *legacy_disassemble_program(char *program_bytecode, int bytecode_length,
  int *_disasm_length, bool print_ignores, int base);
 char *legacy_convert_file(char *file_name, int *_disasm_length,
  bool print_ignores, int base);
+char *legacy_convert_file_mem(char *src, int len, int *_disasm_length,
+ bool print_ignores, int base);
 
 char *find_non_identifier_char(char *str);
-CORE_LIBSPEC char *assemble_program(char *src, int *size);
+
+CORE_LIBSPEC void assemble_program(char *program_source, char **_bytecode,
+ int *_bytecode_length, struct command_mapping **_command_map,
+ int *_command_map_length);
 
 #ifdef CONFIG_EDITOR
+
+CORE_LIBSPEC int legacy_disassemble_command(char *command_base, char *output_base,
+ int *line_length, int bytecode_length, bool print_ignores, int base);
 
 CORE_LIBSPEC struct token *parse_command(char *src, char **_next,
  int *num_parse_tokens);

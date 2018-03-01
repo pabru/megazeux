@@ -1,6 +1,6 @@
 /* MegaZeux
  *
- * Copyright (C) 2012 Alice Lauren Rowan <petrifiedrowan@gmail.com>
+ * Copyright (C) 2017 Alice Rowan <petrifiedrowan@gmail.com>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
@@ -21,18 +21,16 @@
 
 __M_BEGIN_DECLS
 
-EDITOR_LIBSPEC void __edit_breakpoints(struct world *mzx_world);
-EDITOR_LIBSPEC int __debug_robot(struct world *mzx_world,
- struct robot *cur_robot, int id);
+EDITOR_LIBSPEC void __debug_robot_config(struct world *mzx_world);
 
+EDITOR_LIBSPEC int __debug_robot_break(struct world *mzx_world,
+ struct robot *cur_robot, int id, int lines_run);
+EDITOR_LIBSPEC int __debug_robot_watch(struct world *mzx_world,
+ struct robot *cur_robot, int id, int lines_run);
+
+EDITOR_LIBSPEC void reset_robot_debugger(void);
 EDITOR_LIBSPEC void free_breakpoints(void);
-EDITOR_LIBSPEC void pause_robot_debugger(void);
 
-struct break_point
-{
-  char match_name[15];
-  char match_string[61];
-  int index[256];
-};
+void update_watchpoint_last_values(struct world *mzx_world);
 
 __M_END_DECLS

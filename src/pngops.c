@@ -26,10 +26,12 @@ int png_write_screen(Uint8 *pixels, struct rgb_color *pal, int count,
  const char *name)
 {
   png_structp png_ptr = NULL;
-  png_bytep *row_ptrs = NULL;
-  png_colorp pal_ptr = NULL;
   png_infop info_ptr = NULL;
-  int i, type, ret = false;
+  png_bytep * volatile row_ptrs = NULL;
+  png_colorp volatile pal_ptr = NULL;
+  int volatile ret = false;
+  int type;
+  int i;
   FILE *f;
 
   f = fopen_unsafe(name, "wb");
@@ -94,18 +96,83 @@ exit_out:
   return ret;
 }
 
+int png_write_screen_32bpp(Uint32 *pixels, const char *name)
+{
+  png_structp png_ptr = NULL;
+  png_infop info_ptr = NULL;
+  png_bytep * volatile row_ptrs = NULL;
+  int volatile ret = false;
+  int type;
+  int i;
+  FILE *f;
+
+  f = fopen_unsafe(name, "wb");
+  if(!f)
+    goto exit_out;
+
+  png_ptr = png_create_write_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
+  if(!png_ptr)
+    goto exit_close;
+
+  info_ptr = png_create_info_struct(png_ptr);
+  if(!info_ptr)
+    goto exit_free_close;
+
+  if(setjmp(png_jmpbuf(png_ptr)))
+    goto exit_free_close;
+
+  png_init_io(png_ptr, f);
+
+  // 24-bit png
+  type = PNG_COLOR_TYPE_RGB;
+  png_set_IHDR(png_ptr, info_ptr, 640, 350, 8, type,
+   PNG_INTERLACE_NONE, PNG_COMPRESSION_TYPE_DEFAULT,
+   PNG_FILTER_TYPE_DEFAULT);
+
+  // do the write of the header
+  png_write_info(png_ptr, info_ptr);
+  png_set_packing(png_ptr);
+
+  row_ptrs = cmalloc(sizeof(png_bytep) * 350);
+  if(!row_ptrs)
+    goto exit_free_close;
+
+  // our surface is 32bpp ABGR, so set up filler and order
+  png_set_filler(png_ptr, 0, PNG_FILLER_AFTER);
+  png_set_bgr(png_ptr);
+
+  // and then the surface
+  for(i = 0; i < 350; i++)
+    row_ptrs[i] = (png_bytep)(pixels + i * 640);
+  png_write_image(png_ptr, row_ptrs);
+  png_write_end(png_ptr, info_ptr);
+
+  // all done
+  ret = true;
+
+exit_free_close:
+  png_destroy_write_struct(&png_ptr, &info_ptr);
+  free(row_ptrs);
+exit_close:
+  fclose(f);
+exit_out:
+  return ret;
+}
+
 #ifdef NEED_PNG_READ_FILE
 
 void *png_read_file(const char *name, png_uint_32 *_w, png_uint_32 *_h,
  check_w_h_constraint_t constraint, rgba_surface_allocator_t allocator)
 {
   png_uint_32 i, w, h, stride;
-  png_structp png_ptr = NULL;
-  png_bytep *row_ptrs = NULL;
-  png_infop info_ptr = NULL;
-  void *pixels, *s = NULL;
   png_byte header[8];
-  int type, bpp;
+  png_structp png_ptr = NULL;
+  png_infop info_ptr = NULL;
+  png_bytep * volatile row_ptrs = NULL;
+  void * volatile s = NULL;
+  void *pixels;
+  int type;
+  int bpp;
   FILE *f;
 
   f = fopen_unsafe(name, "rb");
@@ -157,7 +224,6 @@ void *png_read_file(const char *name, png_uint_32 *_w, png_uint_32 *_h,
 
   if(png_get_valid(png_ptr, info_ptr, PNG_INFO_tRNS))
     png_set_tRNS_to_alpha(png_ptr);
-
   else if(!(type & PNG_COLOR_MASK_ALPHA))
     png_set_add_alpha(png_ptr, 0xff, PNG_FILLER_AFTER);
 

@@ -780,7 +780,7 @@ static int pe_fish(struct world *mzx_world, int param)
 static int pe_shark(struct world *mzx_world, int param)
 {
   int intel = (param & 0x07) + 1;
-  int fire_rate = ((param >> 5) & 0x03) + 1;
+  int fire_rate = ((param >> 5) & 0x07) + 1;
   int fires = ((param >> 3) & 0x03);
   struct dialog di;
   struct element *elements[5];
@@ -1025,7 +1025,10 @@ int edit_sensor(struct world *mzx_world, struct sensor *cur_sensor)
   struct element *elements[5];
   int dialog_result;
 
-  set_context(94);
+  // Prevent previous keys from carrying through.
+  force_release_all_keys();
+
+  set_context(CTX_SENSOR_EDITOR);
   strcpy(sensor_name, cur_sensor->sensor_name);
   strcpy(sensor_robot, cur_sensor->robot_to_mesg);
 
@@ -1042,6 +1045,9 @@ int edit_sensor(struct world *mzx_world, struct sensor *cur_sensor)
 
   dialog_result = run_dialog(mzx_world, &di);
   destruct_dialog(&di);
+
+  // Prevent UI keys from carrying through.
+  force_release_all_keys();
 
   pop_context();
 
@@ -1072,7 +1078,7 @@ int edit_robot(struct world *mzx_world, struct robot *cur_robot)
   m_show();
 
   if(intake(mzx_world, cur_robot->robot_name, 14, 34, 13,
-   15, 1, 0, NULL, 0, NULL) != IKEY_ESCAPE)
+   15, 1, 0, NULL, 0, NULL) != IKEY_ESCAPE && !get_exit_status())
   {
     restore_screen();
     save_screen();
@@ -1089,18 +1095,17 @@ int edit_robot(struct world *mzx_world, struct robot *cur_robot)
     {
       cur_robot->robot_char = new_char;
       // Now edit the program.
-      set_context(87);
+      set_context(CTX_ROBO_ED);
       robot_editor(mzx_world, cur_robot);
+      pop_context();
     }
   }
   else
   {
-    pop_context();
     restore_screen();
     return -1;
   }
 
-  pop_context();
   restore_screen();
   return 0;
 }
@@ -1109,6 +1114,9 @@ int edit_robot(struct world *mzx_world, struct robot *cur_robot)
 // use default or load up a new robot/scroll/sign.
 int edit_param(struct world *mzx_world, int id, int param)
 {
+  // Prevent previous keys from carrying through.
+  force_release_all_keys();
+
   // Switch default params to handle the basic stuff
   switch(def_params[id])
   {
@@ -1125,6 +1133,9 @@ int edit_param(struct world *mzx_world, int id, int param)
         return 0;
       }
     }
+
+    /* fallthrough */
+
     // Character
     case -3:
     {
@@ -1149,6 +1160,7 @@ int edit_param(struct world *mzx_world, int id, int param)
 
       return new_param;
     }
+
     // Board
     case -4:
     {
@@ -1363,6 +1375,10 @@ int edit_param(struct world *mzx_world, int id, int param)
       break;
     }
   }
+
+  // Prevent UI keys from carrying through.
+  force_release_all_keys();
+
   // Return param
   return param;
 }

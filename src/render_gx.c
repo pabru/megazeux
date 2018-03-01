@@ -67,7 +67,6 @@ struct gx_render_data
   int chrdirty;
   int paldirty;
   int curfb;
-  enum ratio_type ratio;
   s16 sx0, sy0, sx1, sy1;
 };
 
@@ -251,7 +250,7 @@ static bool gx_init_video(struct graphics_data *graphics,
 
   render_data = cmalloc(sizeof(struct gx_render_data));
   graphics->render_data = render_data;
-  render_data->ratio = conf->video_ratio;
+  graphics->ratio = conf->video_ratio;
 
   VIDEO_Init();
 
@@ -385,7 +384,7 @@ static bool gx_set_video_mode(struct graphics_data *graphics,
     sh = fs * 3;
   }
 
-  fix_viewport_ratio(sw, sh, &dw, &dh, render_data->ratio);
+  fix_viewport_ratio(sw, sh, &dw, &dh, graphics->ratio);
 
   if(render_data->rmode->viWidth > render_data->rmode->fbWidth)
     xscale = (float)render_data->rmode->fbWidth / render_data->rmode->viWidth;
@@ -711,12 +710,12 @@ static void gx_render_graph(struct graphics_data *graphics)
 }
 
 static void gx_render_cursor(struct graphics_data *graphics,
- Uint32 x, Uint32 y, Uint8 color, Uint8 lines, Uint8 offset)
+ Uint32 x, Uint32 y, Uint16 color, Uint8 lines, Uint8 offset)
 {
   struct gx_render_data *render_data = graphics->render_data;
   GXColor *pal = render_data->palette;
 
-  GX_SetChanMatColor(GX_COLOR0A0, pal[color]);
+  GX_SetChanMatColor(GX_COLOR0A0, pal[color & 0xFF]);
   GX_Begin(GX_QUADS, GX_VTXFMT0, 4);
     GX_Position2s16(x * 8, y * 14 + offset);
     GX_TexCoord2f32(0, 0);
